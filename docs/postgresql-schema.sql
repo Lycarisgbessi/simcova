@@ -232,7 +232,8 @@ CREATE TABLE platform_settings (
   default_deposit_percent INTEGER NOT NULL DEFAULT 30,
   bank_transfer_threshold INTEGER NOT NULL DEFAULT 5000000,
   commission_rate_percent INTEGER NOT NULL DEFAULT 0,
-  vat_rate_percent INTEGER NOT NULL DEFAULT 0
+  vat_rate_percent INTEGER NOT NULL DEFAULT 0,
+  maintenance_mode BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE push_subscriptions (
@@ -272,6 +273,9 @@ CREATE TABLE outbox_emails (
   body_text TEXT NOT NULL,
   action_url TEXT,
   action_label TEXT,
+  sent_at TIMESTAMPTZ,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

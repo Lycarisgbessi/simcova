@@ -43,6 +43,16 @@ npm test          # e2e complet (cycle marketplace) + mailer + moteur de règles
 npm run lint      # tsc --noEmit
 ```
 
+## Déploiement
+
+- **Code source** : https://github.com/Lycarisgbessi/simcova (branche `main`)
+- **Base de production (Neon PostgreSQL)** : schéma de référence + données initiales appliqués via
+  `DATABASE_URL=... npm run db:setup` (idempotent : tables, index, règles RG-01..10, catalogue initial).
+- **Runtime actuel** : SQLite (défaut, zéro configuration). La base Neon est provisionnée et prête ;
+  la migration du runtime applicatif vers PostgreSQL est le prochain jalon (schéma déjà synchronisé).
+- Hébergement applicatif : tout hôte Node 22+ (VPS, Render, Railway…) derrière HTTPS —
+  `npm install && npm run build && NODE_ENV=production npm start`.
+
 ## Architecture en bref
 
 - `server.ts` + `server/` : API Express, SQLite (`node:sqlite`, WAL), jobs de maintenance (expiration RG-10, purge KYC, flush email), rate limiting, SSE.
