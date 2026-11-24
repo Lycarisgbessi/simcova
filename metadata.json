@@ -1,0 +1,8 @@
+{
+  "name": "Remix SIMCOVA",
+  "description": "An all-in-one platform for comprehensive marketplace development, analysis, and execution based on your specific requirements.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

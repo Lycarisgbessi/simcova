@@ -1,0 +1,17 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Base SQLite locale + pièces uploadées + secrets de secours auto-générés
+data/
+
+# Node 22 embarqué pour la démo (le projet exige Node >= 22.5 pour node:sqlite)
+tools/
+
+# Artefacts locaux AI Studio
+.aistudio/

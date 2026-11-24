@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "SIMCOVA — Machines & Matériel Pro",
+  "short_name": "SIMCOVA",
+  "description": "Commandez tracteurs, machines industrielles et matériel BTP sans compte auprès de concessionnaires certifiés.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "theme_color": "#131921",
+  "background_color": "#EAEDED",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
