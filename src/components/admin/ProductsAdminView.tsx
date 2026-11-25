@@ -74,7 +74,7 @@ export const ProductsAdminView: React.FC<ProductsAdminViewProps> = ({ currency, 
         </button>
       </div>
 
-      <div className="rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)] overflow-x-auto">
+      <div className="sim-table-wrap rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)]">
         <table className="w-full text-left text-xs">
           <thead className="bg-[var(--sim-bg-subtle)] text-[var(--sim-text-muted)]">
             <tr>

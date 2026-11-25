@@ -59,7 +59,7 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({ orderId, cur
             initial={{ opacity: 0, scale: 0.97, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.97, y: 10 }}
-            className="w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-[var(--sim-radius-xl)] bg-[var(--sim-bg-surface)] border border-[var(--sim-border-strong)] shadow-[var(--sim-shadow-3)]"
+            className="sim-modal-mobile w-full max-w-4xl max-h-[88vh] overflow-y-auto rounded-[var(--sim-radius-xl)] bg-[var(--sim-bg-surface)] border border-[var(--sim-border-strong)] shadow-[var(--sim-shadow-3)]"
           >
             {loading || !o ? (
               <div className="p-10 text-center text-sm text-[var(--sim-text-secondary)]">Chargement de la commande…</div>

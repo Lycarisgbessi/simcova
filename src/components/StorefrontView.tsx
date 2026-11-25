@@ -547,7 +547,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
 
           {/* Colonne centrale : Carrousel / Vitrine engins lourds */}
           <div className="lg:col-span-6">
-            <div className="relative h-[250px] sm:h-[300px] lg:h-full min-h-[295px] overflow-hidden rounded-[var(--sim-radius-md)] border border-[var(--sim-border-hairline)] bg-[var(--sim-steel-950)] shadow-[var(--sim-shadow-1)]">
+            <div className="relative h-[250px] sm:h-[300px] lg:h-full min-h-[295px] overflow-hidden rounded-[var(--sim-radius-md)] touch-pan-y border border-[var(--sim-border-hairline)] bg-[var(--sim-steel-950)] shadow-[var(--sim-shadow-1)]">
               <img
                 src={currentSlide.image}
                 alt={currentSlide.alt}
@@ -1290,7 +1290,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                 </div>
               )
             ) : loading ? (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4 sim-product-grid">
                 {[1, 2, 3, 4, 5, 6].map((idx) => (
                   <div
                     key={idx}
@@ -1462,7 +1462,7 @@ export const StorefrontView: React.FC<StorefrontViewProps> = ({
                 })}
               </div>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 sm:gap-4 sim-product-grid">
                 {displayedProducts.map((product, index) => {
                   const primaryImg = product.media[0]?.url;
                   const isCertified =

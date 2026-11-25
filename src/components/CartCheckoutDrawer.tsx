@@ -361,7 +361,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
             transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
-            className="flex h-full w-full max-w-lg flex-col bg-[var(--sim-bg-surface)] shadow-[var(--sim-shadow-3)] border-l border-[var(--sim-border-strong)]"
+            className="flex h-full w-full max-w-lg sim-drawer-mobile flex-col bg-[var(--sim-bg-surface)] shadow-[var(--sim-shadow-3)] border-l border-[var(--sim-border-strong)]"
           >
             {/* En-tête acier du tiroir */}
             <div className="bg-[var(--sim-steel-950)] text-white px-6 py-4 border-b border-[var(--sim-steel-800)]">
@@ -551,7 +551,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                     </label>
                     <input
                       id="guest-email"
-                      type="email"
+                      type="email" inputMode="email"
                       required
                       value={buyerEmail}
                       onChange={(e) => setBuyerEmail(e.target.value)}
@@ -566,7 +566,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                     </label>
                     <input
                       id="guest-phone"
-                      type="tel"
+                      type="tel" inputMode="tel"
                       value={buyerPhone}
                       onChange={(e) => setBuyerPhone(e.target.value)}
                       placeholder="+225 07..."
@@ -1016,7 +1016,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
 
             {/* Pied du tiroir avec récapitulatif exact EXF-510 */}
             {(step === 'cart' || step === 'guest-form') && items.length > 0 && (
-              <div className="border-t border-[var(--sim-border-hairline)] bg-[var(--sim-bg-subtle)] px-6 py-4 space-y-3">
+              <div className="sim-sticky-total border-t border-[var(--sim-border-hairline)] bg-[var(--sim-bg-subtle)] px-6 py-4 space-y-3">
                 <div className="space-y-1 text-xs text-[var(--sim-text-secondary)]">
                   <div className="flex justify-between">
                     <span>Sous-total articles</span>

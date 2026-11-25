@@ -440,7 +440,7 @@ export const VendorWorkspace: React.FC<VendorWorkspaceProps> = ({
               <p className="text-xs text-[var(--sim-text-muted)]">
                 Espace Vendeur · {shop?.name}
               </p>
-              <div className="mt-1 flex flex-wrap items-center gap-2.5">
+              <div className="mt-1 sim-tabs-bar items-center gap-2.5">
                 <span className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-semibold ${statusMeta.tone}`}>
                   {isCertified && <ShieldCheck className="w-3.5 h-3.5" />}
                   {statusMeta.label}

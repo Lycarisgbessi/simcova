@@ -200,7 +200,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({
           animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{ opacity: 0, y: 10, scale: 0.98 }}
           transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-          className="relative my-auto w-full max-w-[1260px] max-h-[92vh] overflow-y-auto rounded-[var(--sim-radius-lg)] bg-[var(--sim-bg-surface)] shadow-[var(--sim-shadow-3)] border border-[var(--sim-border-strong)]"
+          className="sim-modal-mobile relative my-auto w-full max-w-[1260px] max-h-[92vh] overflow-y-auto rounded-[var(--sim-radius-lg)] bg-[var(--sim-bg-surface)] shadow-[var(--sim-shadow-3)] border border-[var(--sim-border-strong)]"
         >
           {/* En-tête navigation Amazon/Alibaba */}
           <div className="sticky top-0 z-20 flex items-center justify-between gap-4 border-b border-[var(--sim-steel-800)] bg-[var(--sim-steel-900)] px-5 py-3 text-white">

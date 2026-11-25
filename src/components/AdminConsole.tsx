@@ -434,7 +434,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({
   return (
     <div className="space-y-6">
       {/* Sous-navigation console Admin */}
-      <div className="flex flex-wrap items-center gap-2 pb-3 border-b border-[var(--sim-border-hairline)]">
+      <div className="sim-tabs-bar items-center gap-2 pb-3 border-b border-[var(--sim-border-hairline)]">
         {navTabs.map((t) => (
           <button
             key={t.id}
@@ -1168,7 +1168,7 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({
             </button>
           </form>
 
-          <div className="rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)] overflow-x-auto">
+          <div className="sim-table-wrap rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)]">
             <table className="w-full text-left text-xs">
               <thead className="bg-[var(--sim-bg-subtle)] text-[var(--sim-text-muted)]">
                 <tr>
@@ -1457,13 +1457,13 @@ export const AdminConsole: React.FC<AdminConsoleProps> = ({
             />
           </div>
 
-          <div className="rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)] overflow-x-auto">
+          <div className="sim-table-wrap rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)]">
             <table className="w-full text-left text-xs">
               <thead className="bg-[var(--sim-bg-subtle)] text-[var(--sim-text-muted)]">
                 <tr>
                   <th className="px-4 py-3 font-semibold">N° Commande</th>
                   <th className="px-4 py-3 font-semibold">Acheteur (sans compte)</th>
-                  <th className="px-4 py-3 font-semibold">Zone &amp; Paiement</th>
+                  <th className="px-4 py-3 font-semibold hide-sm">Zone &amp; Paiement</th>
                   <th className="px-4 py-3 font-semibold">Réf. Jumia</th>
                   <th className="px-4 py-3 font-semibold">Montant</th>
                   <th className="px-4 py-3 font-semibold">Statut</th>
