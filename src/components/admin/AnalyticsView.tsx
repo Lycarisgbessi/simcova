@@ -75,7 +75,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ currency, onToast 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="inline-flex rounded-[var(--sim-radius-md)] border border-[var(--sim-border-strong)] bg-[var(--sim-bg-surface)] p-1">
+        <div className="sim-tabs-bar rounded-[var(--sim-radius-md)] border border-[var(--sim-border-strong)] bg-[var(--sim-bg-surface)] p-1">
           {PERIODS.map((p) => (
             <button
               key={p.id}
@@ -96,7 +96,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ currency, onToast 
       {data && (
         <>
           {/* KPIs principaux */}
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+          <div className="grid grid-cols-1 min-[400px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 sm:gap-3">
             <Kpi label="Encaissé TTC" value={formatCurrency(data.kpis.totalGrandPaid, currency)} sub={`${data.kpis.paidCount} commande(s) payée(s)`} />
             <Kpi label="Panier moyen" value={formatCurrency(data.kpis.avgBasket, currency)} sub="commandes payées" />
             <Kpi label="Commission plateforme" value={formatCurrency(data.kpis.commissionEarned, currency)} sub={`TVA collectée ${formatCurrency(data.kpis.vatCollected, currency)}`} highlight />
@@ -132,7 +132,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ currency, onToast 
             </div>
           </SectionCard>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 sm:gap-4">
             <SectionCard title="Top produits (CA encaissé)">
               {data.topProducts.length === 0 ? (
                 <p className="text-xs text-[var(--sim-text-muted)]">Pas encore de ventes sur la période.</p>

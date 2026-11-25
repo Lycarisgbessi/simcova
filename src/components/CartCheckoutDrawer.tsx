@@ -1066,7 +1066,7 @@ export const CartCheckoutDrawer: React.FC<CartCheckoutDrawerProps> = ({
                     <ArrowRight className="w-4 h-4" />
                   </button>
                 ) : (
-                  <div className="flex gap-2.5">
+                  <div className="flex flex-col min-[400px]:flex-row gap-2.5">
                     <button
                       type="button"
                       onClick={() => setStep('cart')}

@@ -53,8 +53,8 @@ export const ProductsAdminView: React.FC<ProductsAdminViewProps> = ({ currency, 
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="flex-1 min-w-64">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-end gap-3">
+        <div className="w-full sm:flex-1 sm:min-w-64">
           <label className="sim-label">Rechercher (titre, vendeur, boutique, rayon)</label>
           <div className="relative">
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-[var(--sim-text-muted)]" />

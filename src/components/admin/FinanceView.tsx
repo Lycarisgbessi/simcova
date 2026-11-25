@@ -153,7 +153,7 @@ export const FinanceView: React.FC<FinanceViewProps> = ({ currency, onExportCsv,
       {/* ============ TRANSACTIONS ============ */}
       {subTab === 'transactions' && (
         <div className="space-y-4">
-          <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)] p-4">
+          <div className="grid grid-cols-1 min-[400px]:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 rounded-[var(--sim-radius-lg)] border border-[var(--sim-border-hairline)] bg-[var(--sim-bg-surface)] p-4">
             <div>
               <label className="sim-label">Période</label>
               <select value={period} onChange={(e) => setPeriod(e.target.value as '7d' | '30d' | '90d' | 'all')} className="sim-input">

@@ -444,3 +444,33 @@ img {
   flex-shrink: 0;
   white-space: nowrap;
 }
+
+
+/* 16. Très grand écran (>= 1536px) : 4 colonnes produits */
+@media (min-width: 1536px) {
+  .sim-product-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+/* 17. Impression : masquer navigation et éléments interactifs */
+@media print {
+  header, nav, footer, button, .sim-sticky-total, [role='dialog'] {
+    display: none !important;
+  }
+  main {
+    padding: 0 !important;
+  }
+  body {
+    background: white !important;
+    color: black !important;
+  }
+}
+
+/* 18. Mobile paysage : réduire la hauteur du carrousel */
+@media (max-height: 500px) and (orientation: landscape) {
+  .sim-modal-mobile {
+    height: auto !important;
+    max-height: 100dvh !important;
+  }
+}
