@@ -185,17 +185,15 @@ function mapShopRow(row: Record<string, unknown> | undefined, options?: { public
   };
 }
 
-function decrementOrderStock(orderId: string, nowIso: string): void {
-  const orderItems = db
-    .prepare('SELECT product_id, variant_id, variant_label, quantity FROM order_items WHERE order_id = ?')
-    .all(orderId) as Array<{
+async function decrementOrderStock(orderId: string, nowIso: string): Promise<void> {
+  const orderItems = (await db.prepare('SELECT product_id, variant_id, variant_label, quantity FROM order_items WHERE order_id = ?').all(orderId) as Array<{
     product_id: string;
     variant_id: string | null;
     variant_label: string | null;
     quantity: number;
-  }>;
+  }>);
   for (const item of orderItems) {
-    const prod = db.prepare('SELECT stock, variants_json FROM products WHERE id = ?').get(item.product_id) as
+    const prod = (await db.prepare('SELECT stock, variants_json FROM products WHERE id = ?').get(item.product_id)) as
       | { stock: number; variants_json: string }
       | undefined;
     if (!prod) continue;
@@ -216,13 +214,13 @@ function decrementOrderStock(orderId: string, nowIso: string): void {
     const allVariantsDepleted = updatedVariants.length > 0 && updatedVariants.every((v) => v.stock <= 0);
     const effectiveStock = allVariantsDepleted ? 0 : nextStock;
     if (effectiveStock === 0) {
-      db.prepare("UPDATE products SET stock = 0, variants_json = ?, status = 'archive', updated_at = ? WHERE id = ?").run(
+      await db.prepare("UPDATE products SET stock = 0, variants_json = ?, status = 'archive', updated_at = ? WHERE id = ?").run(
         JSON.stringify(updatedVariants),
         nowIso,
         item.product_id
       );
     } else {
-      db.prepare('UPDATE products SET stock = ?, variants_json = ?, updated_at = ? WHERE id = ?').run(
+      await db.prepare('UPDATE products SET stock = ?, variants_json = ?, updated_at = ? WHERE id = ?').run(
         effectiveStock,
         JSON.stringify(updatedVariants),
         nowIso,
@@ -232,19 +230,19 @@ function decrementOrderStock(orderId: string, nowIso: string): void {
   }
 }
 
-function getAuthenticatedUser(req: Request): UserAccount | null {
+async function getAuthenticatedUser(req: Request): Promise<UserAccount | null> {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) return null;
   const token = header.slice('Bearer '.length).trim();
   const decoded = verifySessionToken(token);
   if (!decoded) return null;
-  const row = db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.userId) as Record<string, unknown> | undefined;
+  const row = (await db.prepare('SELECT * FROM users WHERE id = ?').get(decoded.userId) as Record<string, unknown> | undefined);
   if (!row) return null;
   return mapUserRow(row);
 }
 
-function requireAuth(req: AuthReq, res: Response, next: NextFunction): void {
-  const user = getAuthenticatedUser(req);
+async function requireAuth(req: AuthReq, res: Response, next: NextFunction): Promise<void> {
+  const user = await getAuthenticatedUser(req);
   if (!user) {
     res.status(401).json({ error: 'Authentification requise.' });
     return;
@@ -253,7 +251,7 @@ function requireAuth(req: AuthReq, res: Response, next: NextFunction): void {
   next();
 }
 
-function requireActiveVendorWrite(req: AuthReq, res: Response, next: NextFunction): void {
+async function requireActiveVendorWrite(req: AuthReq, res: Response, next: NextFunction): Promise<void> {
   const user = req.authUser;
   if (!user) {
     res.status(401).json({ error: 'Authentification requise.' });
@@ -268,8 +266,8 @@ function requireActiveVendorWrite(req: AuthReq, res: Response, next: NextFunctio
   next();
 }
 
-function requireAdmin(req: AuthReq, res: Response, next: NextFunction): void {
-  const user = getAuthenticatedUser(req);
+async function requireAdmin(req: AuthReq, res: Response, next: NextFunction): Promise<void> {
+  const user = await getAuthenticatedUser(req);
   if (!user) {
     res.status(401).json({ error: 'Authentification administrateur requise.' });
     return;
@@ -282,9 +280,9 @@ function requireAdmin(req: AuthReq, res: Response, next: NextFunction): void {
   next();
 }
 
-function adminNeedsBootstrap(): boolean {
+async function adminNeedsBootstrap(): Promise<boolean> {
   if (process.env.SIMCOVA_ADMIN_PASSCODE?.trim()) return false;
-  const admin = db.prepare("SELECT password_hash FROM users WHERE role = 'admin' LIMIT 1").get() as
+  const admin = (await db.prepare("SELECT password_hash FROM users WHERE role = 'admin' LIMIT 1").get()) as
     | { password_hash: string }
     | undefined;
   return !admin || !admin.password_hash;
@@ -309,29 +307,29 @@ function slugify(text: string): string {
  * Collision-resistant order number: 8 random digits with a DB uniqueness retry loop
  * (the previous 4-digit scheme would collide on the UNIQUE constraint around ~10k orders/year).
  */
-function generateUniqueOrderNumber(): string {
+async function generateUniqueOrderNumber(): Promise<string> {
   const prefix = `CMD-${new Date().getFullYear()}-`;
   for (let attempt = 0; attempt < 20; attempt++) {
     const candidate = `${prefix}${String(crypto.randomInt(10000000, 99999999))}`;
-    const clash = db.prepare('SELECT 1 AS one FROM orders WHERE order_number = ?').get(candidate);
+    const clash = (await db.prepare('SELECT 1 AS one FROM orders WHERE order_number = ?').get(candidate));
     if (!clash) return candidate;
   }
   // astronomically unlikely fallback
   return `${prefix}${Date.now().toString().slice(-11)}`;
 }
 
-export function createApiRouter(): Router {
+export async function createApiRouter(): Promise<Router> {
   const router = express.Router();
 
   // Mode maintenance : non-admin API access is rejected while the flag is on
   // (bootstrap/auth stay open so admins can log in and the storefront shows the banner)
-  router.use((req: AuthReq, res, next) => {
+  router.use(async (req: AuthReq, res, next) => {
     if (req.path === '/bootstrap' || req.path.startsWith('/auth/') || req.path.startsWith('/payments/jumia/webhook')) {
       return next();
     }
     try {
-      if (getPlatformSettings().maintenanceMode) {
-        const user = getAuthenticatedUser(req);
+      if ((await getPlatformSettings()).maintenanceMode) {
+        const user = await getAuthenticatedUser(req);
         if (!user || user.role !== 'admin') {
           return res.status(503).json({
             error: 'SIMCOVA est momentanément en maintenance. Merci de réessayer dans quelques instants.',
@@ -346,7 +344,7 @@ export function createApiRouter(): Router {
   });
 
   // Serve safe uploaded media from data/uploads with path confinement
-  router.get('/uploads/:fileName', (req, res) => {
+  router.get('/uploads/:fileName', async (req, res) => {
     const safeName = path.basename(req.params.fileName);
     const resolved = path.resolve(UPLOADS_PATH, safeName);
     if (!resolved.startsWith(UPLOADS_PATH + path.sep) || !fs.existsSync(resolved)) {
@@ -356,7 +354,7 @@ export function createApiRouter(): Router {
   });
 
   // OpenAPI 3.0 Spec (§5.2)
-  router.get('/openapi.json', (_req, res) => {
+  router.get('/openapi.json', async (_req, res) => {
     res.json({
       openapi: '3.0.3',
       info: {
@@ -378,8 +376,8 @@ export function createApiRouter(): Router {
   });
 
   // Bootstrap endpoint
-  router.get('/bootstrap', (_req, res) => {
-    const categories = db.prepare('SELECT * FROM categories ORDER BY name ASC').all().map((c: Record<string, unknown>) => ({
+  router.get('/bootstrap', async (_req, res) => {
+    const categories = (await db.prepare('SELECT * FROM categories ORDER BY name ASC').all()).map((c: Record<string, unknown>) => ({
       id: String(c.id),
       name: String(c.name),
       slug: String(c.slug),
@@ -388,11 +386,10 @@ export function createApiRouter(): Router {
       requiredBadge: c.required_badge ? String(c.required_badge) : null,
     }));
 
-    const rules = getRulesMap();
-    const settings = getPlatformSettings();
+    const rules = await getRulesMap();
+    const settings = await getPlatformSettings();
 
-    const shops = db
-      .prepare(
+    const shops = (await db.prepare(
         `SELECT s.*, u.badges_json, u.status as vendor_status,
           COALESCE((SELECT AVG(r.rating) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as review_count,
@@ -402,16 +399,14 @@ export function createApiRouter(): Router {
          JOIN users u ON u.id = s.vendor_id
          WHERE u.status IN ('valide', 'certifie')
          ORDER BY s.created_at ASC`
-      )
-      .all()
-      .map((s: Record<string, unknown>) => mapShopRow(s, { publicView: true })!);
+      ).all()).map((s: Record<string, unknown>) => mapShopRow(s, { publicView: true })!);
 
     res.json({
       categories,
       rules,
       settings,
       shops,
-      adminNeedsClaim: adminNeedsBootstrap(),
+      adminNeedsClaim: await adminNeedsBootstrap(),
     });
   });
 
@@ -419,8 +414,8 @@ export function createApiRouter(): Router {
   // AUTHENTICATION & VENDOR ACCOUNTS (EXF-101 .. EXF-107)
   // =========================================================================
 
-  router.post('/auth/admin-bootstrap', rateLimit(10, 60_000), (req, res) => {
-    if (!adminNeedsBootstrap()) {
+  router.post('/auth/admin-bootstrap', rateLimit(10, 60_000), async (req, res) => {
+    if (!await adminNeedsBootstrap()) {
       return res.status(403).json({ error: 'Le compte administrateur est déjà initialisé.' });
     }
     const { password } = req.body as { password?: string };
@@ -428,10 +423,10 @@ export function createApiRouter(): Router {
     if (!check.valid) {
       return res.status(400).json({ error: check.reason });
     }
-    const admin = db.prepare("SELECT * FROM users WHERE role = 'admin' LIMIT 1").get() as Record<string, unknown>;
+    const admin = (await db.prepare("SELECT * FROM users WHERE role = 'admin' LIMIT 1").get() as Record<string, unknown>);
     const hash = hashPassword(password!);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, admin.id as string);
-    writeAuditLog({
+    await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, admin.id as string);
+    await writeAuditLog({
       actorId: String(admin.id),
       actorEmail: String(admin.email),
       action: 'ADMIN_BOOTSTRAP',
@@ -440,19 +435,19 @@ export function createApiRouter(): Router {
       details: 'Mot de passe administrateur initialisé lors du premier démarrage.',
     });
     const user = mapUserRow(admin);
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as Record<string, unknown> | undefined;
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as Record<string, unknown> | undefined);
     const token = signSessionToken(user.id, 'admin');
     res.json({ token, user, shop: mapShopRow(shopRow) });
   });
 
-  router.post('/auth/login', rateLimit(20, 60_000), (req, res) => {
+  router.post('/auth/login', rateLimit(20, 60_000), async (req, res) => {
     const { email, password } = req.body as { email?: string; password?: string };
     if (!email || !password) {
       return res.status(400).json({ error: 'Veuillez saisir votre courriel et votre mot de passe.' });
     }
-    const row = db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)').get(email.trim()) as
+    const row = (await db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)').get(email.trim()) as
       | Record<string, unknown>
-      | undefined;
+      | undefined);
     if (!row) {
       return res.status(401).json({ error: 'Identifiants incorrects.' });
     }
@@ -478,18 +473,18 @@ export function createApiRouter(): Router {
     }
 
     const user = mapUserRow(row);
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as Record<string, unknown> | undefined;
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as Record<string, unknown> | undefined);
     const token = signSessionToken(user.id, user.role);
     res.json({ token, user, shop: mapShopRow(shopRow) });
   });
 
-  router.get('/auth/me', requireAuth, (req: AuthReq, res) => {
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.authUser!.id) as Record<string, unknown> | undefined;
+  router.get('/auth/me', requireAuth, async (req: AuthReq, res) => {
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.authUser!.id) as Record<string, unknown> | undefined);
     res.json({ user: req.authUser, shop: mapShopRow(shopRow) });
   });
 
-  router.post('/auth/register', rateLimit(15, 60_000), (req, res) => {
-    const rules = getRulesMap();
+  router.post('/auth/register', rateLimit(15, 60_000), async (req, res) => {
+    const rules = await getRulesMap();
     const rg04 = rules['RG-04'];
     const requiredFields = (rg04?.valueJson?.requiredFields as string[]) ?? ['fullName', 'email', 'password', 'shopName'];
 
@@ -519,7 +514,7 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: passCheck.reason });
     }
 
-    const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+    const existing = (await db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email));
     if (existing) {
       return res.status(409).json({ error: 'Un compte vendeur existe déjà avec cette adresse électronique.' });
     }
@@ -531,14 +526,14 @@ export function createApiRouter(): Router {
     const now = new Date().toISOString();
     const shopName = String(body.shopName || '').trim();
     const baseSlug = slugify(shopName) || shopId;
-    const slugCollision = db.prepare('SELECT id FROM shops WHERE slug = ?').get(baseSlug);
+    const slugCollision = (await db.prepare('SELECT id FROM shops WHERE slug = ?').get(baseSlug));
     const shopSlug = slugCollision ? `${baseSlug}-${userId.slice(-4)}` : baseSlug;
 
     const customFields: Record<string, string> = {};
     if (body.phone) customFields.phone = body.phone.trim();
     if (body.city) customFields.city = body.city.trim();
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO users (id, email, full_name, password_hash, role, email_verified, verification_token, verification_expires_at, status, badges_json, custom_fields_json, created_at)
       VALUES (?, ?, ?, ?, 'vendor', 0, ?, ?, 'en_attente', '[]', ?, ?)
     `).run(
@@ -552,7 +547,7 @@ export function createApiRouter(): Router {
       now
     );
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO shops (id, vendor_id, slug, name, description, contact_email, contact_phone, city, default_delivery_fee, default_delivery_delay, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 2000, '24 à 72h', ?)
     `).run(
@@ -568,7 +563,7 @@ export function createApiRouter(): Router {
     );
 
     const verifyUrl = `${getBaseUrl(req)}/?verify_email=${encodeURIComponent(verToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: email,
       subject: 'SIMCOVA — Confirmez votre adresse électronique vendeur',
       bodyText: `Bonjour ${body.fullName}, confirmez votre adresse électronique pour activer votre espace vendeur « ${shopName} ».`,
@@ -576,7 +571,7 @@ export function createApiRouter(): Router {
       actionLabel: 'Activer mon compte vendeur',
     });
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: userId,
       actorEmail: email,
       action: 'VENDOR_REGISTERED',
@@ -585,8 +580,8 @@ export function createApiRouter(): Router {
       details: `Inscription de la boutique « ${shopName} »`,
     });
 
-    const userRow = db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as Record<string, unknown>;
-    const shopRow = db.prepare('SELECT * FROM shops WHERE id = ?').get(shopId) as Record<string, unknown> | undefined;
+    const userRow = (await db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as Record<string, unknown>);
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE id = ?').get(shopId) as Record<string, unknown> | undefined);
     const token = signSessionToken(userId, 'vendor');
 
     // Tokens only travel via the outbox email; echoed in the response for demo purposes
@@ -599,13 +594,11 @@ export function createApiRouter(): Router {
     });
   });
 
-  router.post('/auth/verify-email', (req, res) => {
+  router.post('/auth/verify-email', async (req, res) => {
     const { token } = req.body as { token?: string };
     if (!token) return res.status(400).json({ error: 'Jeton de confirmation manquant.' });
 
-    const row = db
-      .prepare('SELECT * FROM users WHERE verification_token = ?')
-      .get(token) as Record<string, unknown> | undefined;
+    const row = (await db.prepare('SELECT * FROM users WHERE verification_token = ?').get(token) as Record<string, unknown> | undefined);
     if (!row) {
       return res.status(400).json({ error: 'Lien de confirmation invalide ou déjà utilisé.' });
     }
@@ -613,27 +606,25 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Ce lien de confirmation a expiré. Demandez un nouvel envoi.' });
     }
 
-    db.prepare('UPDATE users SET email_verified = 1, verification_token = NULL, verification_expires_at = NULL WHERE id = ?').run(
+    await db.prepare('UPDATE users SET email_verified = 1, verification_token = NULL, verification_expires_at = NULL WHERE id = ?').run(
       String(row.id)
     );
-    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(String(row.id)) as Record<string, unknown>;
+    const updated = (await db.prepare('SELECT * FROM users WHERE id = ?').get(String(row.id)) as Record<string, unknown>);
     res.json({ verified: true, user: mapUserRow(updated) });
   });
 
-  router.post('/auth/resend-verification', requireAuth, (req: AuthReq, res) => {
+  router.post('/auth/resend-verification', requireAuth, async (req: AuthReq, res) => {
     const user = req.authUser!;
     if (user.emailVerified) {
       return res.json({ alreadyVerified: true });
     }
     const verToken = randomToken(20);
     const verExp = new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString();
-    db.prepare('UPDATE users SET verification_token = ?, verification_expires_at = ? WHERE id = ?').run(
-      verToken,
+    await db.prepare('UPDATE users SET verification_token = ?, verification_expires_at = ? WHERE id = ?').run(verToken,
       verExp,
-      user.id
-    );
+      user.id);
     const verifyUrl = `${getBaseUrl(req)}/?verify_email=${encodeURIComponent(verToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: user.email,
       subject: 'SIMCOVA — Nouveau lien de confirmation courriel',
       bodyText: 'Voici votre nouveau lien d’activation de compte vendeur SIMCOVA.',
@@ -643,22 +634,22 @@ export function createApiRouter(): Router {
     res.json({ sent: true, ...(exposeDemoTokens() ? { verificationToken: verToken, verificationUrl: verifyUrl } : {}) });
   });
 
-  router.post('/auth/forgot-password', rateLimit(10, 60_000), (req, res) => {
+  router.post('/auth/forgot-password', rateLimit(10, 60_000), async (req, res) => {
     const { email } = req.body as { email?: string };
     if (!email) return res.status(400).json({ error: 'Adresse électronique requise.' });
-    const row = db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)').get(email.trim()) as
+    const row = (await db.prepare('SELECT * FROM users WHERE LOWER(email) = LOWER(?)').get(email.trim()) as
       | Record<string, unknown>
-      | undefined;
+      | undefined);
     if (row && row.role === 'vendor') {
       const resetToken = randomToken(20);
       const exp = new Date(Date.now() + 1000 * 60 * 60).toISOString();
-      db.prepare('UPDATE users SET reset_token = ?, reset_expires_at = ? WHERE id = ?').run(
+      await db.prepare('UPDATE users SET reset_token = ?, reset_expires_at = ? WHERE id = ?').run(
         resetToken,
         exp,
         String(row.id)
       );
       const resetUrl = `${getBaseUrl(req)}/?reset_password=${encodeURIComponent(resetToken)}`;
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: String(row.email),
         subject: 'SIMCOVA — Réinitialisation de mot de passe',
         bodyText: 'Utilisez ce lien unique (valable 1 heure) pour définir un nouveau mot de passe vendeur.',
@@ -670,17 +661,17 @@ export function createApiRouter(): Router {
     res.json({ sent: true });
   });
 
-  router.post('/auth/reset-password', (req, res) => {
+  router.post('/auth/reset-password', async (req, res) => {
     const { token, newPassword } = req.body as { token?: string; newPassword?: string };
     if (!token || !newPassword) return res.status(400).json({ error: 'Jeton et nouveau mot de passe requis.' });
     const check = validatePasswordStrength(newPassword);
     if (!check.valid) return res.status(400).json({ error: check.reason });
 
-    const row = db.prepare('SELECT * FROM users WHERE reset_token = ?').get(token) as Record<string, unknown> | undefined;
+    const row = (await db.prepare('SELECT * FROM users WHERE reset_token = ?').get(token) as Record<string, unknown> | undefined);
     if (!row || !row.reset_expires_at || Date.now() > Date.parse(String(row.reset_expires_at))) {
       return res.status(400).json({ error: 'Lien de réinitialisation invalide ou expiré.' });
     }
-    db.prepare('UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires_at = NULL WHERE id = ?').run(
+    await db.prepare('UPDATE users SET password_hash = ?, reset_token = NULL, reset_expires_at = NULL WHERE id = ?').run(
       hashPassword(newPassword),
       String(row.id)
     );
@@ -691,7 +682,7 @@ export function createApiRouter(): Router {
   // PUBLIC CATALOG, SHOPS & PRODUCT DETAIL (EXF-401, EXF-402, EXF-107)
   // =========================================================================
 
-  router.get('/products', (req, res) => {
+  router.get('/products', async (req, res) => {
     const q = String(req.query.q || '').trim();
     const category = String(req.query.category || '').trim();
     const shop = String(req.query.shop || '').trim();
@@ -707,8 +698,7 @@ export function createApiRouter(): Router {
         : undefined;
     const minRating = Number(req.query.minRating || 0);
 
-    const rows = db
-      .prepare(
+    const rows = (await db.prepare(
         `SELECT p.*, s.name as shop_name, s.slug as shop_slug, u.badges_json as shop_badges, u.status as vendor_status,
           c.name as category_name, c.active as cat_active, c.forbidden as cat_forbidden,
           COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as rating_average,
@@ -723,8 +713,7 @@ export function createApiRouter(): Router {
            AND u.status != 'rejete'
            AND c.active = 1
            AND c.forbidden = 0`
-      )
-      .all() as Array<Record<string, unknown>>;
+      ).all() as Array<Record<string, unknown>>);
 
     const products = filterAndSortProducts(rows.map(mapProductRow), {
       q,
@@ -743,7 +732,7 @@ export function createApiRouter(): Router {
     res.json({ products });
   });
 
-  router.get('/shops', (req, res) => {
+  router.get('/shops', async (req, res) => {
     const q = String(req.query.q || '').trim();
     const minSales = Number(req.query.minSales || 0);
     const certifiedOnly = req.query.certifiedOnly === 'true';
@@ -752,8 +741,7 @@ export function createApiRouter(): Router {
     const minRating = Number(req.query.minRating || 0);
     const sort = String(req.query.sort || 'sales_desc');
 
-    const shopRows = db
-      .prepare(
+    const shopRows = (await db.prepare(
         `SELECT s.*, u.badges_json, u.status as vendor_status,
           COALESCE((SELECT AVG(r.rating) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as review_count,
@@ -762,17 +750,14 @@ export function createApiRouter(): Router {
          FROM shops s
          JOIN users u ON u.id = s.vendor_id
          WHERE u.status IN ('valide', 'certifie')`
-      )
-      .all() as Array<Record<string, unknown>>;
+      ).all() as Array<Record<string, unknown>>);
 
-    const prodRows = db
-      .prepare(
+    const prodRows = (await db.prepare(
         `SELECT p.shop_id, p.title, p.keywords_json, c.name as category_name
          FROM products p
          JOIN categories c ON c.id = p.category_id
          WHERE p.status = 'publie' AND p.stock > 0 AND c.active = 1 AND c.forbidden = 0`
-      )
-      .all() as Array<{ shop_id: string; title: string; keywords_json: string; category_name: string }>;
+      ).all() as Array<{ shop_id: string; title: string; keywords_json: string; category_name: string }>);
 
     const catalogTextByShopId: Record<string, string> = {};
     for (const pr of prodRows) {
@@ -795,9 +780,8 @@ export function createApiRouter(): Router {
     res.json({ shops });
   });
 
-  router.get('/products/:id', (req, res) => {
-    const row = db
-      .prepare(
+  router.get('/products/:id', async (req, res) => {
+    const row = (await db.prepare(
         `SELECT p.*, s.name as shop_name, s.slug as shop_slug, s.description as shop_description, s.logo_url as shop_logo_url,
           s.city as shop_city, s.bank_iban as shop_bank_iban, s.bank_name as shop_bank_name, s.bank_account_holder as shop_bank_holder,
           u.badges_json as shop_badges, u.status as vendor_status, c.name as category_name,
@@ -809,22 +793,18 @@ export function createApiRouter(): Router {
          JOIN users u ON u.id = p.vendor_id
          JOIN categories c ON c.id = p.category_id
          WHERE p.id = ? AND p.status = 'publie' AND u.status != 'suspendu' AND u.status != 'rejete' AND c.active = 1 AND c.forbidden = 0`
-      )
-      .get(req.params.id) as Record<string, unknown> | undefined;
+      ).get(req.params.id) as Record<string, unknown> | undefined);
 
     if (!row) {
       return res.status(404).json({ error: 'Produit introuvable ou indisponible.' });
     }
 
     // Anonymous product view counter (admin statistics — no personal tracking)
-    db.prepare('UPDATE products SET view_count = view_count + 1 WHERE id = ?').run(req.params.id);
+    await db.prepare('UPDATE products SET view_count = view_count + 1 WHERE id = ?').run(req.params.id);
 
-    const reviews = db
-      .prepare(
+    const reviews = (await db.prepare(
         `SELECT * FROM reviews WHERE product_id = ? AND moderation_status = 'visible' ORDER BY created_at DESC`
-      )
-      .all(req.params.id)
-      .map((r: Record<string, unknown>) => ({
+      ).all(req.params.id)).map((r: Record<string, unknown>) => ({
         id: String(r.id),
         productId: String(r.product_id),
         orderId: String(r.order_id),
@@ -858,9 +838,8 @@ export function createApiRouter(): Router {
     });
   });
 
-  router.get('/shops/:slug', (req, res) => {
-    const shopRow = db
-      .prepare(
+  router.get('/shops/:slug', async (req, res) => {
+    const shopRow = (await db.prepare(
         `SELECT s.*, u.badges_json, u.status as vendor_status,
           COALESCE((SELECT AVG(r.rating) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.shop_id = s.id AND r.moderation_status = 'visible'), 0) as review_count,
@@ -868,15 +847,13 @@ export function createApiRouter(): Router {
           COALESCE((SELECT COUNT(*) FROM products p WHERE p.shop_id = s.id AND p.status = 'publie' AND p.stock > 0), 0) as published_products_count
          FROM shops s JOIN users u ON u.id = s.vendor_id
          WHERE s.slug = ? AND u.status != 'suspendu' AND u.status != 'rejete'`
-      )
-      .get(req.params.slug) as Record<string, unknown> | undefined;
+      ).get(req.params.slug) as Record<string, unknown> | undefined);
 
     if (!shopRow) {
       return res.status(404).json({ error: 'Boutique introuvable ou suspendue.' });
     }
 
-    const products = db
-      .prepare(
+    const products = (await db.prepare(
         `SELECT p.*, s.name as shop_name, s.slug as shop_slug, u.badges_json as shop_badges, u.status as vendor_status, c.name as category_name,
           COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as review_count
@@ -886,19 +863,14 @@ export function createApiRouter(): Router {
          JOIN categories c ON c.id = p.category_id
          WHERE p.shop_id = ? AND p.status = 'publie' AND p.stock > 0 AND c.active = 1 AND c.forbidden = 0
          ORDER BY p.created_at DESC`
-      )
-      .all(String(shopRow.id))
-      .map((r) => mapProductRow(r as Record<string, unknown>));
+    ).all(String(shopRow.id))).map((r) => mapProductRow(r as Record<string, unknown>));
 
-    const reviews = db
-      .prepare(
+    const reviews = (await db.prepare(
         `SELECT r.*, p.title as product_title
          FROM reviews r JOIN products p ON p.id = r.product_id
          WHERE p.shop_id = ? AND r.moderation_status = 'visible'
          ORDER BY r.created_at DESC LIMIT 20`
-      )
-      .all(String(shopRow.id))
-      .map((r: Record<string, unknown>) => ({
+    ).all(String(shopRow.id))).map((r: Record<string, unknown>) => ({
         id: String(r.id),
         productId: String(r.product_id),
         productTitle: String(r.product_title),
@@ -909,8 +881,7 @@ export function createApiRouter(): Router {
         vendorReply: r.vendor_reply ? String(r.vendor_reply) : null,
         vendorRepliedAt: r.vendor_replied_at ? String(r.vendor_replied_at) : null,
         reportCount: Number(r.report_count),
-        moderationStatus: String(r.moderation_status),
-        createdAt: String(r.created_at),
+        moderationStatus: String(r.moderation_status),        createdAt: String(r.created_at),
       }));
 
     res.json({
@@ -974,8 +945,8 @@ export function createApiRouter(): Router {
       const mode: PaymentMode =
         paymentMode && ['full', 'deposit', 'quote', 'bank_transfer'].includes(paymentMode) ? paymentMode : 'full';
 
-      const rules = getRulesMap();
-      const settings = getPlatformSettings();
+      const rules = await getRulesMap();
+      const settings = await getPlatformSettings();
       const allSupportedMethods: PaymentMethodId[] = [
         'jumia_card',
         'mobile_money_orange',
@@ -990,15 +961,13 @@ export function createApiRouter(): Router {
       const zoneDefaults = (rules['RG-09']?.valueJson?.zones as DeliveryZoneFee[] | undefined) ?? [];
       const expirationHours = Number((rules['RG-10']?.valueJson?.expirationHours as number) ?? 48);
 
-      const productRows = db
-        .prepare(
+      const productRows = (await db.prepare(
           `SELECT p.*, u.status as vendor_status, c.active as cat_active, c.forbidden as cat_forbidden
            FROM products p
            JOIN users u ON u.id = p.vendor_id
            JOIN categories c ON c.id = p.category_id
            WHERE p.status = 'publie' AND u.status != 'suspendu' AND u.status != 'rejete' AND c.active = 1 AND c.forbidden = 0`
-        )
-        .all() as Array<Record<string, unknown>>;
+        ).all() as Array<Record<string, unknown>>);
       const productsById = new Map<string, Product>();
       for (const r of productRows) {
         const p = mapProductRow(r);
@@ -1026,7 +995,7 @@ export function createApiRouter(): Router {
       let appliedPromo: { code: string; discount: number } | null = null;
       if (promoCode?.trim()) {
         const normalized = promoCode.trim().toUpperCase();
-        const promoRow = db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(normalized) as
+        const promoRow = (await db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(normalized)) as
           | Record<string, unknown>
           | undefined;
         if (!promoRow || !Number(promoRow.active)) {
@@ -1048,7 +1017,7 @@ export function createApiRouter(): Router {
             ? Math.round((calc.grandTotalBeforeDiscount * Math.min(100, Number(promoRow.discount_value))) / 100)
             : Math.min(Number(promoRow.discount_value), calc.grandTotalBeforeDiscount);
         appliedPromo = { code: normalized, discount };
-        db.prepare('UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?').run(normalized);
+        await db.prepare('UPDATE promo_codes SET used_count = used_count + 1 WHERE code = ?').run(normalized);
         calc.discountAmount = discount;
         calc.grandTotal = calc.grandTotalBeforeDiscount - discount;
         payableAmount = calc.grandTotal;
@@ -1060,7 +1029,7 @@ export function createApiRouter(): Router {
       let primaryShopRow: Record<string, unknown> | undefined;
 
       for (const sId of uniqueShopIds) {
-        const sRow = db.prepare('SELECT * FROM shops WHERE id = ?').get(sId) as Record<string, unknown> | undefined;
+        const sRow = (await db.prepare('SELECT * FROM shops WHERE id = ?').get(sId) as Record<string, unknown> | undefined);
         if (!primaryShopRow && sRow) primaryShopRow = sRow;
         const bank = sRow ? extractBankDetails(sRow) : null;
         if (!bank || !sRow) {
@@ -1087,7 +1056,7 @@ export function createApiRouter(): Router {
       }
 
       const orderId = `ord-${crypto.randomUUID().slice(0, 8)}`;
-      const orderNumber = generateUniqueOrderNumber();
+      const orderNumber = await generateUniqueOrderNumber();
       const now = new Date().toISOString();
       const expiresAt = mode === 'quote' ? null : new Date(Date.now() + expirationHours * 3600_000).toISOString();
 
@@ -1110,7 +1079,7 @@ export function createApiRouter(): Router {
             ? `Demande de devis sur mesure (${orderNumber}) — Montant indicatif ${calc.totalAmount} ${settings.currency}.\n${specsSummary || 'Détails personnalisés joints à la commande.'}`
             : `Commande par virement bancaire (${orderNumber}) — Montant total ${calc.totalAmount} ${settings.currency}.${bankTransferRef?.trim() ? ` Réf. acheteur : ${bankTransferRef.trim()}.` : ''} Merci de confirmer la réception des fonds et le planning d’expédition ici même.`;
 
-        db.prepare(`
+        await db.prepare(`
           INSERT INTO messages (id, thread_id, product_id, shop_id, vendor_id, buyer_name, buyer_email, thread_token_version, sender_role, body, read_by_vendor, created_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'buyer', ?, 0, ?)
         `).run(
@@ -1131,7 +1100,7 @@ export function createApiRouter(): Router {
       const storedPaymentMethod =
         mode === 'quote' ? 'quote' : mode === 'bank_transfer' ? 'bank_transfer' : resolvedPaymentMethod;
 
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO orders (
           id, order_number, buyer_name, buyer_email, buyer_phone, shipping_address, delivery_zone,
           subtotal, delivery_total, total_amount, vat_amount, commission_amount, promo_code, discount_amount, payment_method, payment_status, payment_mode,
@@ -1168,10 +1137,10 @@ export function createApiRouter(): Router {
       const initialItemStatus: OrderEventStatus =
         mode === 'quote' ? 'devis_demande' : mode === 'bank_transfer' ? 'en_attente_virement' : 'en_attente_paiement';
 
-      const insertItem = db.prepare(`
+      const insertItem = (await db.prepare(`
         INSERT INTO order_items (id, order_id, product_id, variant_id, vendor_id, product_title, variant_label, quantity, unit_price, delivery_fee, item_status, custom_specs_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `);
+      `));
       for (const line of calc.resolvedLines) {
         insertItem.run(
           `oi-${crypto.randomUUID().slice(0, 8)}`,
@@ -1189,7 +1158,7 @@ export function createApiRouter(): Router {
         );
       }
 
-      db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
         `ev-${crypto.randomUUID().slice(0, 8)}`,
         orderId,
         'creee',
@@ -1202,7 +1171,7 @@ export function createApiRouter(): Router {
       const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
 
       if (mode === 'quote') {
-        db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+        await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
           `ev-${crypto.randomUUID().slice(0, 8)}`,
           orderId,
           'devis_demande',
@@ -1212,7 +1181,7 @@ export function createApiRouter(): Router {
         );
 
         if (primaryShopRow) {
-          queueTransactionalEmail({
+          await queueTransactionalEmail({
             toEmail: String(primaryShopRow.contact_email),
             subject: `SIMCOVA — Nouvelle demande de devis sur mesure (${orderNumber})`,
             bodyText: `${buyerName.trim()} a soumis une offre personnalisée (${calc.totalAmount} ${settings.currency}). Répondez exclusivement depuis votre espace vendeur SIMCOVA.`,
@@ -1220,7 +1189,7 @@ export function createApiRouter(): Router {
             actionLabel: null,
           });
         }
-        queueTransactionalEmail({
+        await queueTransactionalEmail({
           toEmail: buyerEmail.trim().toLowerCase(),
           subject: `SIMCOVA — Demande de devis ${orderNumber} transmise`,
           bodyText: `Votre demande sur mesure a été ouverte. Échangez obligatoirement avec le vendeur sur notre messagerie sécurisée pour finaliser le tarif et la livraison.`,
@@ -1262,7 +1231,7 @@ export function createApiRouter(): Router {
       }
 
       if (mode === 'bank_transfer') {
-        db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+        await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
           `ev-${crypto.randomUUID().slice(0, 8)}`,
           orderId,
           'en_attente_virement',
@@ -1275,7 +1244,7 @@ export function createApiRouter(): Router {
           .map((v) => `${v.shopName} — ${v.bankDetails.bankName} / IBAN: ${v.bankDetails.iban} (Titulaire: ${v.bankDetails.accountHolder})`)
           .join('\n');
 
-        queueTransactionalEmail({
+        await queueTransactionalEmail({
           toEmail: buyerEmail.trim().toLowerCase(),
           subject: `SIMCOVA — Coordonnées bancaires pour votre commande ${orderNumber}`,
           bodyText: `Effectuez le virement de ${calc.totalAmount} ${settings.currency} avec la référence ${orderNumber} :\n${bankSummary}\nFinalisez ensuite la coordination sur votre fil sécurisé SIMCOVA.`,
@@ -1324,7 +1293,7 @@ export function createApiRouter(): Router {
           ? `Session Jumia Africa ouverte pour l’acompte (${breakdown.depositPercentApplied}% = ${breakdown.upfrontAmount} ${settings.currency}). Solde à la livraison : ${breakdown.balanceDue} ${settings.currency}.`
           : `Session de paiement Jumia Africa ouverte (${breakdown.upfrontAmount} ${settings.currency}).`;
 
-      db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
         `ev-${crypto.randomUUID().slice(0, 8)}`,
         orderId,
         'en_attente_paiement',
@@ -1344,7 +1313,7 @@ export function createApiRouter(): Router {
         returnUrl: trackingUrl,
       });
 
-      db.prepare(`
+      await db.prepare(`
         INSERT INTO payments (id, order_id, provider, provider_ref, method, amount, status, webhook_events_json, created_at, updated_at)
         VALUES (?, ?, 'jumia_africa', ?, ?, ?, 'pending', '[]', ?, ?)
       `).run(
@@ -1390,21 +1359,21 @@ export function createApiRouter(): Router {
     }
   });
 
-  function applyJumiaWebhookOutcome(params: {
+  async function applyJumiaWebhookOutcome(params: {
     providerRef: string;
     status: 'paid' | 'failed' | 'cancelled' | 'refunded';
     amount: number;
     rawEvent: Record<string, unknown>;
     baseUrl: string;
-  }): { ok: boolean; error?: string; orderNumber?: string; trackingToken?: string } {
-    const payRow = db.prepare('SELECT * FROM payments WHERE provider_ref = ?').get(params.providerRef) as
+  }): Promise<{ ok: boolean; error?: string; orderNumber?: string; trackingToken?: string }> {
+    const payRow = (await db.prepare('SELECT * FROM payments WHERE provider_ref = ?').get(params.providerRef)) as
       | Record<string, unknown>
       | undefined;
     if (!payRow) return { ok: false, error: 'Transaction introuvable.' };
 
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(String(payRow.order_id)) as
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(String(payRow.order_id)) as
       | Record<string, unknown>
-      | undefined;
+      | undefined);
     if (!orderRow) return { ok: false, error: 'Commande introuvable.' };
 
     // EXF-504: Verify exact server-side expected payment session amount (covers full or deposit)
@@ -1440,7 +1409,7 @@ export function createApiRouter(): Router {
           ? 'refunded'
           : 'failed';
 
-    db.prepare('UPDATE payments SET status = ?, webhook_events_json = ?, updated_at = ? WHERE id = ?').run(
+    await db.prepare('UPDATE payments SET status = ?, webhook_events_json = ?, updated_at = ? WHERE id = ?').run(
       newPaymentStatus,
       JSON.stringify(eventsHistory),
       now,
@@ -1457,14 +1426,14 @@ export function createApiRouter(): Router {
         ? `Acompte confirmé via Jumia Africa (${paidAmount} FCFA, Réf. ${params.providerRef}). Solde restant à payer à la livraison : ${balanceDue} FCFA.`
         : `Paiement intégral confirmé via Jumia Africa (Réf. ${params.providerRef}).`;
 
-      db.prepare('UPDATE orders SET payment_status = ?, paid_amount = ?, balance_due = ? WHERE id = ?').run(
+      await db.prepare('UPDATE orders SET payment_status = ?, paid_amount = ?, balance_due = ? WHERE id = ?').run(
         'paid',
         paidAmount,
         balanceDue,
         String(orderRow.id)
       );
-      db.prepare('UPDATE order_items SET item_status = ? WHERE order_id = ?').run(itemStatus, String(orderRow.id));
-      db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      await db.prepare('UPDATE order_items SET item_status = ? WHERE order_id = ?').run(itemStatus, String(orderRow.id));
+      await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
         `ev-${crypto.randomUUID().slice(0, 8)}`,
         String(orderRow.id),
         eventStatus,
@@ -1473,9 +1442,9 @@ export function createApiRouter(): Router {
         now
       );
 
-      decrementOrderStock(String(orderRow.id), now);
+      await decrementOrderStock(String(orderRow.id), now);
 
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: String(orderRow.buyer_email),
         subject: `SIMCOVA — Confirmation ${isDeposit ? 'd’acompte' : 'de commande'} ${String(orderRow.order_number)}`,
         bodyText: isDeposit
@@ -1486,8 +1455,8 @@ export function createApiRouter(): Router {
       });
     } else if (params.status === 'failed' || params.status === 'cancelled') {
       // EXF-505: Payment declined or abandoned — keep order recoverable with retry link until RG-10 expiration
-      db.prepare("UPDATE orders SET payment_status = 'pending' WHERE id = ?").run(String(orderRow.id));
-      db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      await db.prepare("UPDATE orders SET payment_status = 'pending' WHERE id = ?").run(String(orderRow.id));
+      await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
         `ev-${crypto.randomUUID().slice(0, 8)}`,
         String(orderRow.id),
         'en_attente_paiement',
@@ -1497,7 +1466,7 @@ export function createApiRouter(): Router {
         'Jumia Africa Webhook',
         now
       );
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: String(orderRow.buyer_email),
         subject: `SIMCOVA — Finalisez le paiement de votre commande ${String(orderRow.order_number)}`,
         bodyText: `Votre paiement n’a pas abouti. Cliquez sur le lien ci-dessous pour reprendre votre règlement avant expiration.`,
@@ -1510,7 +1479,7 @@ export function createApiRouter(): Router {
   }
 
   // Signed webhook endpoint from Jumia Africa PSP (EXF-503 / EXF-504)
-  router.post('/payments/jumia/webhook', (req: RawBodyReq, res) => {
+  router.post('/payments/jumia/webhook', async (req: RawBodyReq, res) => {
     const signature = req.headers['x-jumia-signature'] as string | undefined;
     // HMAC must be verified against the exact raw bytes received — re-serializing a parsed
     // body is fragile (key order/unicode escaping). server.ts captures req.rawBody for us.
@@ -1519,7 +1488,7 @@ export function createApiRouter(): Router {
     if (!verified) {
       return res.status(401).json({ error: 'Signature webhook Jumia Africa invalide.' });
     }
-    const result = applyJumiaWebhookOutcome({
+    const result = await applyJumiaWebhookOutcome({
       providerRef: verified.providerRef,
       status: verified.status,
       amount: verified.amount,
@@ -1533,7 +1502,7 @@ export function createApiRouter(): Router {
   });
 
   // Sandbox gateway execution helper (generates a real HMAC-signed webhook event in sandbox mode)
-  router.post('/payments/jumia/sandbox-complete', (req, res) => {
+  router.post('/payments/jumia/sandbox-complete', async (req, res) => {
     const { providerRef, outcome } = req.body as {
       providerRef?: string;
       outcome?: 'paid' | 'failed' | 'cancelled';
@@ -1541,7 +1510,7 @@ export function createApiRouter(): Router {
     if (!providerRef || !outcome) {
       return res.status(400).json({ error: 'Référence et issue requises.' });
     }
-    const payRow = db.prepare('SELECT * FROM payments WHERE provider_ref = ?').get(providerRef) as
+    const payRow = (await db.prepare('SELECT * FROM payments WHERE provider_ref = ?').get(providerRef)) as
       | Record<string, unknown>
       | undefined;
     if (!payRow) {
@@ -1560,7 +1529,7 @@ export function createApiRouter(): Router {
       return res.status(500).json({ error: 'Échec de vérification interne du webhook sandbox.' });
     }
 
-    const result = applyJumiaWebhookOutcome({
+    const result = await applyJumiaWebhookOutcome({
       providerRef: verified.providerRef,
       status: verified.status,
       amount: verified.amount,
@@ -1579,12 +1548,12 @@ export function createApiRouter(): Router {
   });
 
   // Guest Order Tracking Page API (EXF-405, EXF-406, EXF-408)
-  router.get('/orders/track/:token', (req, res) => {
+  router.get('/orders/track/:token', async (req, res) => {
     const decoded = verifyOrderTrackingToken(req.params.token);
     if (!decoded) {
       return res.status(401).json({ error: 'Lien de suivi invalide ou expiré.' });
     }
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId) as
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId)) as
       | Record<string, unknown>
       | undefined;
     if (!orderRow || Number(orderRow.tracking_token_version) !== decoded.version) {
@@ -1592,19 +1561,16 @@ export function createApiRouter(): Router {
     }
 
     // RG-10 automatic expiration check (shared with the periodic maintenance sweep)
-    expireOrderIfDue(orderRow);
+    await expireOrderIfDue(orderRow);
 
-    const items = db
-      .prepare(
+    const items = (await db.prepare(
         `SELECT oi.*, p.media_json, s.id as shop_id, s.name as shop_name, s.slug as shop_slug,
           (SELECT id FROM reviews r WHERE r.order_id = oi.order_id AND r.product_id = oi.product_id LIMIT 1) as existing_review_id
          FROM order_items oi
          JOIN products p ON p.id = oi.product_id
          JOIN shops s ON s.id = p.shop_id
          WHERE oi.order_id = ?`
-      )
-      .all(decoded.orderId)
-      .map((it: Record<string, unknown>) => ({
+      ).all(decoded.orderId)).map((it: Record<string, unknown>) => ({
         id: String(it.id),
         orderId: String(it.order_id),
         productId: String(it.product_id),
@@ -1625,10 +1591,7 @@ export function createApiRouter(): Router {
         customSpecs: it.custom_specs_json ? JSON.parse(String(it.custom_specs_json)) : null,
       }));
 
-    const events = db
-      .prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC')
-      .all(decoded.orderId)
-      .map((ev: Record<string, unknown>) => ({
+    const events = (await db.prepare('SELECT * FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(decoded.orderId)).map((ev: Record<string, unknown>) => ({
         id: String(ev.id),
         orderId: String(ev.order_id),
         status: String(ev.status) as OrderEventStatus,
@@ -1637,8 +1600,8 @@ export function createApiRouter(): Router {
         createdAt: String(ev.created_at),
       }));
 
-    const payment = db.prepare('SELECT provider_ref, method, status, amount FROM payments WHERE order_id = ?').get(decoded.orderId);
-    const settings = getPlatformSettings();
+    const payment = (await db.prepare('SELECT provider_ref, method, status, amount FROM payments WHERE order_id = ?').get(decoded.orderId));
+    const settings = await getPlatformSettings();
     const orderMode = String(orderRow.payment_mode || 'full') as PaymentMode;
 
     const vendorBankDetails: VendorBankCoordinate[] = [];
@@ -1647,7 +1610,7 @@ export function createApiRouter(): Router {
       for (const it of items) {
         if (seenShops.has(it.shopId)) continue;
         seenShops.add(it.shopId);
-        const sRow = db.prepare('SELECT * FROM shops WHERE id = ?').get(it.shopId) as Record<string, unknown> | undefined;
+        const sRow = (await db.prepare('SELECT * FROM shops WHERE id = ?').get(it.shopId) as Record<string, unknown> | undefined);
         const bank = sRow ? extractBankDetails(sRow) : null;
         if (bank && sRow) {
           vendorBankDetails.push({
@@ -1702,7 +1665,7 @@ export function createApiRouter(): Router {
   router.post('/orders/track/:token/pay-quote', async (req, res) => {
     const decoded = verifyOrderTrackingToken(req.params.token);
     if (!decoded) return res.status(401).json({ error: 'Lien de suivi invalide ou expiré.' });
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId) as Record<string, unknown> | undefined;
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId) as Record<string, unknown> | undefined);
     if (!orderRow || Number(orderRow.tracking_token_version) !== decoded.version) {
       return res.status(401).json({ error: 'Jeton révoqué.' });
     }
@@ -1716,13 +1679,11 @@ export function createApiRouter(): Router {
       bankTransferRef?: string;
     };
     const nextMode = targetMode || 'full';
-    const settings = getPlatformSettings();
+    const settings = await getPlatformSettings();
     // Payable amount is VAT-inclusive (equals HT total when VAT is disabled).
     const totalAmount = Number(orderRow.total_amount) + Number(orderRow.vat_amount ?? 0);
 
-    const shopRows = db
-      .prepare('SELECT DISTINCT s.* FROM order_items oi JOIN products p ON p.id = oi.product_id JOIN shops s ON s.id = p.shop_id WHERE oi.order_id = ?')
-      .all(decoded.orderId) as Array<Record<string, unknown>>;
+    const shopRows = (await db.prepare('SELECT DISTINCT s.* FROM order_items oi JOIN products p ON p.id = oi.product_id JOIN shops s ON s.id = p.shop_id WHERE oi.order_id = ?').all(decoded.orderId) as Array<Record<string, unknown>>);
     const allHaveBank = shopRows.length > 0 && shopRows.every((s) => Boolean(extractBankDetails(s)));
 
     const breakdown = computePaymentBreakdown({
@@ -1739,12 +1700,12 @@ export function createApiRouter(): Router {
 
     const now = new Date().toISOString();
     if (nextMode === 'bank_transfer') {
-      db.prepare("UPDATE orders SET payment_mode = 'bank_transfer', payment_method = 'bank_transfer', bank_transfer_ref = ? WHERE id = ?").run(
+      await db.prepare("UPDATE orders SET payment_mode = 'bank_transfer', payment_method = 'bank_transfer', bank_transfer_ref = ? WHERE id = ?").run(
         bankTransferRef?.trim() || null,
         decoded.orderId
       );
-      db.prepare("UPDATE order_items SET item_status = 'en_attente_virement' WHERE order_id = ?").run(decoded.orderId);
-      db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      await db.prepare("UPDATE order_items SET item_status = 'en_attente_virement' WHERE order_id = ?").run(decoded.orderId);
+      await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
         `ev-${crypto.randomUUID().slice(0, 8)}`,
         decoded.orderId,
         'en_attente_virement',
@@ -1768,19 +1729,19 @@ export function createApiRouter(): Router {
       returnUrl: trackingUrl,
     });
 
-    db.prepare('UPDATE orders SET payment_mode = ?, payment_method = ?, deposit_percent = ? WHERE id = ?').run(
+    await db.prepare('UPDATE orders SET payment_mode = ?, payment_method = ?, deposit_percent = ? WHERE id = ?').run(
       nextMode,
       method,
       breakdown.depositPercentApplied,
       decoded.orderId
     );
-    db.prepare("UPDATE order_items SET item_status = 'en_attente_paiement' WHERE order_id = ?").run(decoded.orderId);
-    db.prepare(`
+    await db.prepare("UPDATE order_items SET item_status = 'en_attente_paiement' WHERE order_id = ?").run(decoded.orderId);
+    await db.prepare(`
       INSERT INTO payments (id, order_id, provider, provider_ref, method, amount, status, webhook_events_json, created_at, updated_at)
       VALUES (?, ?, 'jumia_africa', ?, ?, ?, 'pending', '[]', ?, ?)
     `).run(`pay-${crypto.randomUUID().slice(0, 8)}`, decoded.orderId, session.providerRef, method, breakdown.upfrontAmount, now, now);
 
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       decoded.orderId,
       'en_attente_paiement',
@@ -1793,21 +1754,21 @@ export function createApiRouter(): Router {
   });
 
   // EXF-408: Regenerate / rotate tracking token on demand
-  router.post('/orders/track/:token/regenerate', (req, res) => {
+  router.post('/orders/track/:token/regenerate', async (req, res) => {
     const decoded = verifyOrderTrackingToken(req.params.token);
     if (!decoded) return res.status(401).json({ error: 'Jeton de suivi invalide.' });
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId) as
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId)) as
       | Record<string, unknown>
       | undefined;
     if (!orderRow || Number(orderRow.tracking_token_version) !== decoded.version) {
       return res.status(401).json({ error: 'Jeton révoqué.' });
     }
     const nextVersion = Number(orderRow.tracking_token_version) + 1;
-    db.prepare('UPDATE orders SET tracking_token_version = ? WHERE id = ?').run(nextVersion, String(orderRow.id));
+    await db.prepare('UPDATE orders SET tracking_token_version = ? WHERE id = ?').run(nextVersion, String(orderRow.id));
     const newToken = signOrderTrackingToken(String(orderRow.id), nextVersion);
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(newToken)}`;
 
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(orderRow.buyer_email),
       subject: `SIMCOVA — Nouveau lien de suivi pour ${String(orderRow.order_number)}`,
       bodyText: 'Conformément à votre demande, l’ancien lien a été révoqué. Voici votre nouveau lien sécurisé.',
@@ -1819,15 +1780,13 @@ export function createApiRouter(): Router {
   });
 
   // EXF-409: Recover orders by email without exposing sensitive order info in HTTP response
-  router.post('/orders/recover', rateLimit(10, 60_000), (req, res) => {
+  router.post('/orders/recover', rateLimit(10, 60_000), async (req, res) => {
     const { email } = req.body as { email?: string };
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
       return res.status(400).json({ error: 'Veuillez saisir une adresse électronique valide.' });
     }
     const normalized = email.trim().toLowerCase();
-    const orders = db
-      .prepare('SELECT id, order_number, tracking_token_version, created_at FROM orders WHERE LOWER(buyer_email) = ? ORDER BY created_at DESC LIMIT 10')
-      .all(normalized) as Array<{ id: string; order_number: string; tracking_token_version: number; created_at: string }>;
+    const orders = (await db.prepare('SELECT id, order_number, tracking_token_version, created_at FROM orders WHERE LOWER(buyer_email) = ? ORDER BY created_at DESC LIMIT 10').all(normalized) as Array<{ id: string; order_number: string; tracking_token_version: number; created_at: string }>);
 
     if (orders.length > 0) {
       const linksList = orders
@@ -1837,7 +1796,7 @@ export function createApiRouter(): Router {
         })
         .join('\n');
       const firstTok = signOrderTrackingToken(orders[0].id, orders[0].tracking_token_version);
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: normalized,
         subject: 'SIMCOVA — Récupération de vos liens de suivi de commande',
         bodyText: `Voici vos liens de suivi sécurisés :\n${linksList}`,
@@ -1856,7 +1815,7 @@ export function createApiRouter(): Router {
   // MESSAGING (GUEST <-> VENDOR) & VERIFIED REVIEWS (EXF-601..606)
   // =========================================================================
 
-  router.post('/messages', rateLimit(15, 60_000), (req, res) => {
+  router.post('/messages', rateLimit(15, 60_000), async (req, res) => {
     const { productId, shopId, buyerName, buyerEmail, body } = req.body as {
       productId?: string;
       shopId?: string;
@@ -1873,12 +1832,12 @@ export function createApiRouter(): Router {
         error: `Message bloqué (${circumvention.reasons.join(', ')}). Pour votre sécurité, tous les échanges doivent rester exclusivement sur la plateforme SIMCOVA.`,
       });
     }
-    const shop = db.prepare('SELECT * FROM shops WHERE id = ?').get(shopId) as Record<string, unknown> | undefined;
+    const shop = (await db.prepare('SELECT * FROM shops WHERE id = ?').get(shopId) as Record<string, unknown> | undefined);
     if (!shop) return res.status(404).json({ error: 'Boutique introuvable.' });
 
     const threadId = `thr-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO messages (id, thread_id, product_id, shop_id, vendor_id, buyer_name, buyer_email, thread_token_version, sender_role, body, read_by_vendor, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'buyer', ?, 0, ?)
     `).run(
@@ -1896,7 +1855,7 @@ export function createApiRouter(): Router {
     const threadToken = signMessageThreadToken(threadId, 1);
     const threadUrl = `${getBaseUrl(req)}/?fil=${encodeURIComponent(threadToken)}`;
 
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(shop.contact_email),
       subject: `SIMCOVA — Nouveau message client de ${buyerName.trim()}`,
       bodyText: body.trim(),
@@ -1912,22 +1871,19 @@ export function createApiRouter(): Router {
     });
   });
 
-  router.get('/messages/thread/:token', (req, res) => {
+  router.get('/messages/thread/:token', async (req, res) => {
     const decoded = verifyMessageThreadToken(req.params.token);
     if (!decoded) return res.status(401).json({ error: 'Lien de conversation invalide ou expiré.' });
 
-    const blocked = db.prepare('SELECT * FROM blocked_threads WHERE thread_id = ?').get(decoded.threadId);
-    const msgs = db
-      .prepare(
+    const blocked = (await db.prepare('SELECT * FROM blocked_threads WHERE thread_id = ?').get(decoded.threadId));
+    const msgs = (await db.prepare(
         `SELECT m.*, s.name as shop_name, p.title as product_title
          FROM messages m
          JOIN shops s ON s.id = m.shop_id
          LEFT JOIN products p ON p.id = m.product_id
          WHERE m.thread_id = ? AND m.hidden_by_moderation = 0
          ORDER BY m.created_at ASC`
-      )
-      .all(decoded.threadId)
-      .map((m: Record<string, unknown>) => ({
+      ).all(decoded.threadId)).map((m: Record<string, unknown>) => ({
         id: String(m.id),
         threadId: String(m.thread_id),
         productId: m.product_id ? String(m.product_id) : null,
@@ -1946,10 +1902,10 @@ export function createApiRouter(): Router {
     res.json({ threadId: decoded.threadId, blocked: Boolean(blocked), messages: msgs });
   });
 
-  router.post('/messages/thread/:token/reply', rateLimit(20, 60_000), (req, res) => {
+  router.post('/messages/thread/:token/reply', rateLimit(20, 60_000), async (req, res) => {
     const decoded = verifyMessageThreadToken(req.params.token);
     if (!decoded) return res.status(401).json({ error: 'Lien de conversation invalide.' });
-    const blocked = db.prepare('SELECT * FROM blocked_threads WHERE thread_id = ?').get(decoded.threadId);
+    const blocked = (await db.prepare('SELECT * FROM blocked_threads WHERE thread_id = ?').get(decoded.threadId));
     if (blocked) return res.status(403).json({ error: 'Ce fil de discussion a été bloqué par la modération.' });
 
     const { body } = req.body as { body?: string };
@@ -1961,13 +1917,13 @@ export function createApiRouter(): Router {
       });
     }
 
-    const first = db.prepare('SELECT * FROM messages WHERE thread_id = ? LIMIT 1').get(decoded.threadId) as
+    const first = (await db.prepare('SELECT * FROM messages WHERE thread_id = ? LIMIT 1').get(decoded.threadId)) as
       | Record<string, unknown>
       | undefined;
     if (!first) return res.status(404).json({ error: 'Fil introuvable.' });
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO messages (id, thread_id, product_id, shop_id, vendor_id, buyer_name, buyer_email, thread_token_version, sender_role, body, read_by_vendor, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'buyer', ?, 0, ?)
     `).run(
@@ -1987,7 +1943,7 @@ export function createApiRouter(): Router {
   });
 
   // EXF-603: Review submission strictly verified against delivered order via tracking token
-  router.post('/reviews', (req, res) => {
+  router.post('/reviews', async (req, res) => {
     const { trackingToken, productId, rating, comment } = req.body as {
       trackingToken?: string;
       productId?: string;
@@ -2000,22 +1956,20 @@ export function createApiRouter(): Router {
     const decoded = verifyOrderTrackingToken(trackingToken);
     if (!decoded) return res.status(401).json({ error: 'Lien de suivi invalide.' });
 
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId) as
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(decoded.orderId)) as
       | Record<string, unknown>
       | undefined;
     if (!orderRow || Number(orderRow.tracking_token_version) !== decoded.version) {
       return res.status(401).json({ error: 'Lien de suivi révoqué.' });
     }
 
-    const item = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND product_id = ?')
-      .get(decoded.orderId, productId);
+    const item = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND product_id = ?').get(decoded.orderId, productId));
     if (!item) {
       return res.status(403).json({ error: 'Ce produit ne figure pas dans cette commande.' });
     }
 
-    const events = db.prepare('SELECT * FROM order_events WHERE order_id = ?').all(decoded.orderId) as unknown as OrderEvent[];
-    const existing = db.prepare('SELECT id FROM reviews WHERE order_id = ? AND product_id = ?').get(decoded.orderId, productId);
+    const events = (await db.prepare('SELECT * FROM order_events WHERE order_id = ?').all(decoded.orderId) as unknown as OrderEvent[]);
+    const existing = (await db.prepare('SELECT id FROM reviews WHERE order_id = ? AND product_id = ?').get(decoded.orderId, productId));
     const check = canLeaveReview(events, Boolean(existing));
     if (!check.allowed) {
       return res.status(403).json({ error: check.reason });
@@ -2024,7 +1978,7 @@ export function createApiRouter(): Router {
     const safeRating = Math.min(5, Math.max(1, Math.round(Number(rating))));
     const revId = `rev-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO reviews (id, product_id, order_id, buyer_name, rating, comment, report_count, moderation_status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 0, 'visible', ?)
     `).run(revId, productId, decoded.orderId, String(orderRow.buyer_name), safeRating, comment.trim(), now);
@@ -2036,7 +1990,7 @@ export function createApiRouter(): Router {
   // VENDOR WORKSPACE (ADMIN-VENDOR & THIRD-PARTY VENDORS, EXF-301..311)
   // =========================================================================
 
-  router.post('/uploads', requireAuth, (req: AuthReq, res) => {
+  router.post('/uploads', requireAuth, async (req: AuthReq, res) => {
     const { dataUrl, fileName } = req.body as { dataUrl?: string; fileName?: string };
     if (!dataUrl || typeof dataUrl !== 'string') {
       return res.status(400).json({ error: 'Fichier média requis.' });
@@ -2061,24 +2015,19 @@ export function createApiRouter(): Router {
     res.status(201).json({ url: `/api/uploads/${outName}`, mime });
   });
 
-  router.get('/vendor/dashboard', requireAuth, (req: AuthReq, res) => {
+  router.get('/vendor/dashboard', requireAuth, async (req: AuthReq, res) => {
     const vendorId = req.authUser!.id;
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(vendorId) as Record<string, unknown> | undefined;
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(vendorId) as Record<string, unknown> | undefined);
     const shop = mapShopRow(shopRow);
-    const products = db
-      .prepare(
+    const products = (await db.prepare(
         `SELECT p.*, c.name as category_name,
           COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as review_count
          FROM products p JOIN categories c ON c.id = p.category_id
          WHERE p.vendor_id = ? ORDER BY p.updated_at DESC`
-      )
-      .all(vendorId)
-      .map((r) => mapProductRow(r as Record<string, unknown>));
+      ).all(vendorId)).map((r) => mapProductRow(r as Record<string, unknown>));
 
-    const orderItems = (
-      db
-        .prepare(
+    const orderItems = (await db.prepare(
           `SELECT oi.*, o.order_number, o.buyer_name, o.buyer_email, o.shipping_address, o.delivery_zone, o.payment_status,
             o.payment_mode, o.deposit_percent, o.paid_amount, o.balance_due, o.total_amount, o.has_custom_offer, o.bank_transfer_ref, o.quote_thread_id,
             o.created_at as order_created_at
@@ -2086,8 +2035,7 @@ export function createApiRouter(): Router {
            JOIN orders o ON o.id = oi.order_id
            WHERE oi.vendor_id = ?
            ORDER BY o.created_at DESC`
-        )
-        .all(vendorId) as Array<Record<string, unknown>>
+        ).all(vendorId) as Array<Record<string, unknown>>
     ).map((o): Record<string, unknown> => ({
       ...o,
       customSpecs: o.custom_specs_json ? JSON.parse(String(o.custom_specs_json)) : null,
@@ -2103,7 +2051,7 @@ export function createApiRouter(): Router {
     const paidOrderIds = [...new Set(orderItems.filter((o) => o.payment_status === 'paid').map((o) => String(o.order_id)))];
     let commissionTotal = 0;
     for (const oid of paidOrderIds) {
-      const ord = db.prepare('SELECT commission_amount FROM orders WHERE id = ?').get(oid) as
+      const ord = (await db.prepare('SELECT commission_amount FROM orders WHERE id = ?').get(oid)) as
         | { commission_amount: number }
         | undefined;
       commissionTotal += Number(ord?.commission_amount ?? 0);
@@ -2115,10 +2063,7 @@ export function createApiRouter(): Router {
         !['livree', 'annulee', 'remboursee', 'expiree'].includes(String(o.item_status))
     ).length;
 
-    const kycDocs = db
-      .prepare('SELECT id, vendor_id, doc_type, file_name, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC')
-      .all(vendorId)
-      .map((d: Record<string, unknown>) => ({
+    const kycDocs = (await db.prepare('SELECT id, vendor_id, doc_type, file_name, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC').all(vendorId)).map((d: Record<string, unknown>) => ({
         id: String(d.id),
         vendorId: String(d.vendor_id),
         docType: String(d.doc_type),
@@ -2131,15 +2076,12 @@ export function createApiRouter(): Router {
         purgeScheduledAt: d.purge_scheduled_at ? String(d.purge_scheduled_at) : null,
       }));
 
-    const reviews = db
-      .prepare(
+    const reviews = (await db.prepare(
         `SELECT r.*, p.title as product_title
          FROM reviews r JOIN products p ON p.id = r.product_id
          WHERE p.vendor_id = ?
          ORDER BY r.created_at DESC LIMIT 25`
-      )
-      .all(vendorId)
-      .map((r: Record<string, unknown>) => ({
+      ).all(vendorId)).map((r: Record<string, unknown>) => ({
         id: String(r.id),
         productId: String(r.product_id),
         productTitle: String(r.product_title),
@@ -2154,15 +2096,12 @@ export function createApiRouter(): Router {
         createdAt: String(r.created_at),
       }));
 
-    const messages = db
-      .prepare(
+    const messages = (await db.prepare(
         `SELECT m.*, p.title as product_title
          FROM messages m LEFT JOIN products p ON p.id = m.product_id
          WHERE m.vendor_id = ? AND m.hidden_by_moderation = 0
          ORDER BY m.created_at ASC`
-      )
-      .all(vendorId)
-      .map((m: Record<string, unknown>) => ({
+      ).all(vendorId)).map((m: Record<string, unknown>) => ({
         id: String(m.id),
         threadId: String(m.thread_id),
         productId: m.product_id ? String(m.product_id) : null,
@@ -2230,7 +2169,7 @@ export function createApiRouter(): Router {
         const parsed = text
           .split(/[,\n]/)
           .map((s) => s.trim().toLowerCase())
-          .filter((s) => s.length >= 2)
+          .filter(async (s) => s.length >= 2)
           .slice(0, 10);
         if (parsed.length >= 3) {
           return res.json({ keywords: parsed, source: 'gemini' });
@@ -2242,9 +2181,9 @@ export function createApiRouter(): Router {
     res.json({ keywords: fallback, source: 'rules' });
   });
 
-  router.post('/vendor/products', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/products', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const shop = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as { id: string } | undefined;
+    const shop = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(user.id) as { id: string } | undefined);
     if (!shop) return res.status(400).json({ error: 'Aucune boutique associée à ce compte.' });
 
     const body = req.body as Partial<Product>;
@@ -2252,7 +2191,7 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Titre, description, catégorie et prix positif sont requis.' });
     }
 
-    const catRow = db.prepare('SELECT * FROM categories WHERE id = ?').get(body.categoryId) as
+    const catRow = (await db.prepare('SELECT * FROM categories WHERE id = ?').get(body.categoryId)) as
       | Record<string, unknown>
       | undefined;
     const category: Category | undefined = catRow
@@ -2268,16 +2207,13 @@ export function createApiRouter(): Router {
 
     const targetStatus: ProductStatus = body.status || 'brouillon';
     const stock = Math.max(0, Math.floor(Number(body.stock ?? 10)));
-    const publishedCount = (
-      db
-        .prepare("SELECT COUNT(*) as c FROM products WHERE vendor_id = ? AND status = 'publie'")
-        .get(user.id) as { c: number }
-    ).c;
+    const publishedCount = (await db.prepare("SELECT COUNT(*) as c FROM products WHERE vendor_id = ? AND status = 'publie'")
+        .get(user.id) as { c: number }).c;
 
     const check = validateProductPublication({
       vendor: user,
       category,
-      rules: getRulesMap(),
+      rules: await getRulesMap(),
       publishedCountExcludingCurrent: publishedCount,
       targetStatus,
       stock,
@@ -2294,7 +2230,7 @@ export function createApiRouter(): Router {
     const id = `prod-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO products (
         id, vendor_id, shop_id, title, description, category_id, price, condition, status,
         stock, keywords_json, media_json, video_url, variants_json, delivery_fee, delivery_zones_json,
@@ -2323,13 +2259,13 @@ export function createApiRouter(): Router {
       now
     );
 
-    const created = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown>;
+    const created = (await db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown>);
     res.status(201).json({ product: mapProductRow(created) });
   });
 
-  router.put('/vendor/products/:id', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.put('/vendor/products/:id', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as
+    const existing = (await db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Produit introuvable.' });
@@ -2341,7 +2277,7 @@ export function createApiRouter(): Router {
 
     const body = req.body as Partial<Product>;
     const catId = body.categoryId || String(existing.category_id);
-    const catRow = db.prepare('SELECT * FROM categories WHERE id = ?').get(catId) as Record<string, unknown> | undefined;
+    const catRow = (await db.prepare('SELECT * FROM categories WHERE id = ?').get(catId) as Record<string, unknown> | undefined);
     const category: Category | undefined = catRow
       ? {
           id: String(catRow.id),
@@ -2355,16 +2291,13 @@ export function createApiRouter(): Router {
 
     const targetStatus: ProductStatus = body.status || (existing.status as ProductStatus);
     const stock = body.stock !== undefined ? Math.max(0, Math.floor(Number(body.stock))) : Number(existing.stock);
-    const publishedCount = (
-      db
-        .prepare("SELECT COUNT(*) as c FROM products WHERE vendor_id = ? AND status = 'publie' AND id != ?")
-        .get(user.id, req.params.id) as { c: number }
-    ).c;
+    const publishedCount = (await db.prepare("SELECT COUNT(*) as c FROM products WHERE vendor_id = ? AND status = 'publie' AND id != ?")
+        .get(user.id, req.params.id) as { c: number }).c;
 
     const check = validateProductPublication({
       vendor: user,
       category,
-      rules: getRulesMap(),
+      rules: await getRulesMap(),
       publishedCountExcludingCurrent: publishedCount,
       targetStatus,
       stock,
@@ -2381,7 +2314,7 @@ export function createApiRouter(): Router {
         : JSON.parse(String(existing.keywords_json || '[]'));
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       UPDATE products SET
         title = ?, description = ?, category_id = ?, price = ?, condition = ?, status = ?,
         stock = ?, keywords_json = ?, media_json = ?, video_url = ?, variants_json = ?,
@@ -2408,13 +2341,13 @@ export function createApiRouter(): Router {
       user.id
     );
 
-    const updated = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as Record<string, unknown>;
+    const updated = (await db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as Record<string, unknown>);
     res.json({ product: mapProductRow(updated) });
   });
 
-  router.post('/vendor/products/:id/duplicate', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/products/:id/duplicate', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const existing = db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id) as
+    const existing = (await db.prepare('SELECT * FROM products WHERE id = ?').get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Produit introuvable.' });
@@ -2422,7 +2355,7 @@ export function createApiRouter(): Router {
 
     const id = `prod-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO products (
         id, vendor_id, shop_id, title, description, category_id, price, condition, status,
         stock, keywords_json, media_json, video_url, variants_json, delivery_fee, delivery_zones_json,
@@ -2450,13 +2383,13 @@ export function createApiRouter(): Router {
       now
     );
 
-    const created = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown>;
+    const created = (await db.prepare('SELECT * FROM products WHERE id = ?').get(id) as Record<string, unknown>);
     res.status(201).json({ product: mapProductRow(created) });
   });
 
-  router.delete('/vendor/products/:id', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.delete('/vendor/products/:id', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const existing = db.prepare('SELECT vendor_id FROM products WHERE id = ?').get(req.params.id) as
+    const existing = (await db.prepare('SELECT vendor_id FROM products WHERE id = ?').get(req.params.id)) as
       | { vendor_id: string }
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Produit introuvable.' });
@@ -2464,19 +2397,19 @@ export function createApiRouter(): Router {
       return res.status(403).json({ error: 'Accès interdit.' });
     }
     // Check if referenced in orders; if so archive instead of hard delete
-    const inOrders = db.prepare('SELECT id FROM order_items WHERE product_id = ? LIMIT 1').get(req.params.id);
+    const inOrders = (await db.prepare('SELECT id FROM order_items WHERE product_id = ? LIMIT 1').get(req.params.id));
     if (inOrders) {
-      db.prepare("UPDATE products SET status = 'archive', updated_at = ? WHERE id = ?").run(
+      await db.prepare("UPDATE products SET status = 'archive', updated_at = ? WHERE id = ?").run(
         new Date().toISOString(),
         req.params.id
       );
       return res.json({ archived: true });
     }
-    db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+    await db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
     res.json({ deleted: true });
   });
 
-  router.put('/vendor/shop', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.put('/vendor/shop', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const { name, description, logoUrl, city, contactPhone, contactEmail, defaultDeliveryFee, defaultDeliveryDelay, bankDetails } =
       req.body as {
         name?: string;
@@ -2489,7 +2422,7 @@ export function createApiRouter(): Router {
         defaultDeliveryDelay?: string;
         bankDetails?: Partial<BankDetails> | null;
       };
-    db.prepare(`
+    await db.prepare(`
       UPDATE shops SET
         name = COALESCE(?, name),
         description = COALESCE(?, description),
@@ -2527,12 +2460,12 @@ export function createApiRouter(): Router {
       bankDetails?.instructions?.trim() || null,
       req.authUser!.id
     );
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.authUser!.id) as Record<string, unknown> | undefined;
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.authUser!.id) as Record<string, unknown> | undefined);
     res.json({ shop: mapShopRow(shopRow) });
   });
 
   // EXF-104: Encrypted KYC Document upload
-  router.post('/vendor/kyc', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/kyc', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const { docType, fileName, contentBase64, mimeType } = req.body as {
       docType?: string;
       fileName?: string;
@@ -2551,10 +2484,10 @@ export function createApiRouter(): Router {
     const encrypted = encryptKycPayload(buffer);
     const id = `kyc-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    const retentionDays = getPlatformSettings().kycRetentionDays;
+    const retentionDays = (await getPlatformSettings()).kycRetentionDays;
     const purgeAt = new Date(Date.now() + retentionDays * 86400_000).toISOString();
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO kyc_documents (id, vendor_id, doc_type, file_name, mime_type, encrypted_payload, iv_hex, auth_tag_hex, review_status, uploaded_at, purge_scheduled_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'en_attente', ?, ?)
     `).run(
@@ -2570,7 +2503,7 @@ export function createApiRouter(): Router {
       purgeAt
     );
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'KYC_UPLOADED',
@@ -2583,7 +2516,7 @@ export function createApiRouter(): Router {
   });
 
   // EXF-309 / EXF-407: Vendor updates order fulfillment state + notifies buyer with tracking link
-  router.post('/vendor/orders/:orderId/status', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/orders/:orderId/status', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
     const { status, carrier, trackingNumber, note } = req.body as {
       status?: OrderEventStatus;
@@ -2602,14 +2535,12 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Statut de livraison invalide.' });
     }
 
-    const vendorItem = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.orderId, user.id) as Record<string, unknown> | undefined;
+    const vendorItem = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1').get(req.params.orderId, user.id) as Record<string, unknown> | undefined);
     if (!vendorItem) {
       return res.status(403).json({ error: 'Cette commande ne contient aucun de vos articles.' });
     }
 
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId)) as
       | Record<string, unknown>
       | undefined;
     if (!orderRow) return res.status(404).json({ error: 'Commande introuvable.' });
@@ -2620,7 +2551,7 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Le règlement (Jumia Africa ou virement bancaire) doit être confirmé avant de préparer ou expédier la commande.' });
     }
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE order_items SET
         item_status = ?,
         carrier = COALESCE(?, carrier),
@@ -2638,7 +2569,7 @@ export function createApiRouter(): Router {
 
     const now = new Date().toISOString();
     const eventNote = note?.trim() || statusLabels[status] || status;
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.orderId,
       status,
@@ -2650,7 +2581,7 @@ export function createApiRouter(): Router {
     const trackingToken = signOrderTrackingToken(String(orderRow.id), Number(orderRow.tracking_token_version));
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
 
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(orderRow.buyer_email),
       subject: `SIMCOVA — Mise à jour de votre commande ${String(orderRow.order_number)}`,
       bodyText: `${statusLabels[status]}.\n${eventNote}`,
@@ -2662,16 +2593,14 @@ export function createApiRouter(): Router {
   });
 
   // Vendor confirms receipt of high-value bank transfer
-  router.post('/vendor/orders/:orderId/confirm-bank-transfer', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/orders/:orderId/confirm-bank-transfer', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
     const { bankReference } = req.body as { bankReference?: string };
-    const vendorItem = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.orderId, user.id) as Record<string, unknown> | undefined;
+    const vendorItem = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1').get(req.params.orderId, user.id) as Record<string, unknown> | undefined);
     if (!vendorItem) {
       return res.status(403).json({ error: 'Cette commande ne contient aucun de vos articles.' });
     }
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined;
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined);
     if (!orderRow) return res.status(404).json({ error: 'Commande introuvable.' });
     if (String(orderRow.payment_mode) !== 'bank_transfer' || orderRow.payment_status !== 'pending') {
       return res.status(400).json({ error: 'Cette commande n’est pas en attente de confirmation de virement bancaire.' });
@@ -2682,13 +2611,11 @@ export function createApiRouter(): Router {
     const total = Number(orderRow.total_amount) + Number(orderRow.vat_amount ?? 0);
     const refLabel = bankReference?.trim() || (orderRow.bank_transfer_ref ? String(orderRow.bank_transfer_ref) : 'Confirmé par le concessionnaire');
 
-    db.prepare("UPDATE orders SET payment_status = 'paid', paid_amount = ?, balance_due = 0, bank_transfer_ref = ? WHERE id = ?").run(
-      total,
+    await db.prepare("UPDATE orders SET payment_status = 'paid', paid_amount = ?, balance_due = 0, bank_transfer_ref = ? WHERE id = ?").run(total,
       refLabel,
-      req.params.orderId
-    );
-    db.prepare("UPDATE order_items SET item_status = 'payee' WHERE order_id = ?").run(req.params.orderId);
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      req.params.orderId);
+    await db.prepare("UPDATE order_items SET item_status = 'payee' WHERE order_id = ?").run(req.params.orderId);
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.orderId,
       'payee',
@@ -2697,11 +2624,11 @@ export function createApiRouter(): Router {
       now
     );
 
-    decrementOrderStock(req.params.orderId, now);
+    await decrementOrderStock(req.params.orderId, now);
 
     const trackingToken = signOrderTrackingToken(String(orderRow.id), Number(orderRow.tracking_token_version));
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(orderRow.buyer_email),
       subject: `SIMCOVA — Virement confirmé pour la commande ${String(orderRow.order_number)}`,
       bodyText: `Le concessionnaire a confirmé la réception de votre virement de ${total} FCFA (${refLabel}). Votre commande passe en préparation.`,
@@ -2713,15 +2640,13 @@ export function createApiRouter(): Router {
   });
 
   // Vendor confirms collection of remaining balance upon delivery for deposit orders
-  router.post('/vendor/orders/:orderId/confirm-balance', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/orders/:orderId/confirm-balance', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const vendorItem = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.orderId, user.id) as Record<string, unknown> | undefined;
+    const vendorItem = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1').get(req.params.orderId, user.id) as Record<string, unknown> | undefined);
     if (!vendorItem) {
       return res.status(403).json({ error: 'Cette commande ne contient aucun de vos articles.' });
     }
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined;
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined);
     if (!orderRow) return res.status(404).json({ error: 'Commande introuvable.' });
     if (orderRow.payment_status !== 'paid' || Number(orderRow.balance_due) <= 0) {
       return res.status(400).json({ error: 'Aucun solde restant à encaisser sur cette commande.' });
@@ -2731,8 +2656,8 @@ export function createApiRouter(): Router {
     // VAT-inclusive total (equals HT total when VAT is disabled)
     const total = Number(orderRow.total_amount) + Number(orderRow.vat_amount ?? 0);
     const collected = Number(orderRow.balance_due);
-    db.prepare('UPDATE orders SET paid_amount = ?, balance_due = 0 WHERE id = ?').run(total, req.params.orderId);
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    await db.prepare('UPDATE orders SET paid_amount = ?, balance_due = 0 WHERE id = ?').run(total, req.params.orderId);
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.orderId,
       'payee',
@@ -2743,7 +2668,7 @@ export function createApiRouter(): Router {
 
     const trackingToken = signOrderTrackingToken(String(orderRow.id), Number(orderRow.tracking_token_version));
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(orderRow.buyer_email),
       subject: `SIMCOVA — Solde réglé pour la commande ${String(orderRow.order_number)}`,
       bodyText: `Votre solde de ${collected} FCFA a été confirmé comme encaissé à la livraison.`,
@@ -2755,42 +2680,38 @@ export function createApiRouter(): Router {
   });
 
   // Vendor proposes/confirms final pricing on a custom quote order
-  router.post('/vendor/orders/:orderId/quote-offer', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/orders/:orderId/quote-offer', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
     const { proposedTotal, note } = req.body as { proposedTotal?: number; note?: string };
     const cleanTotal = Math.round(Number(proposedTotal || 0));
     if (!Number.isFinite(cleanTotal) || cleanTotal <= 0) {
       return res.status(400).json({ error: 'Veuillez indiquer un montant de devis valide.' });
     }
-    const vendorItem = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.orderId, user.id) as Record<string, unknown> | undefined;
+    const vendorItem = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1').get(req.params.orderId, user.id) as Record<string, unknown> | undefined);
     if (!vendorItem) {
       return res.status(403).json({ error: 'Cette commande ne contient aucun de vos articles.' });
     }
-    const orderRow = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined;
+    const orderRow = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined);
     if (!orderRow) return res.status(404).json({ error: 'Commande introuvable.' });
     if (String(orderRow.payment_mode) !== 'quote' || orderRow.payment_status !== 'pending') {
       return res.status(400).json({ error: 'Cette commande n’est plus en phase de devis.' });
     }
 
     const now = new Date().toISOString();
-    const settings = getPlatformSettings();
+    const settings = await getPlatformSettings();
     const deliveryTotal = Number(orderRow.delivery_total || 0);
     // The vendor proposes an all-inclusive (TTC) amount: split VAT out and recompute the marketplace commission.
     const { vatAmount, netTotal } = splitInclusiveVat(cleanTotal, settings.vatRatePercent);
     const subtotal = Math.max(0, netTotal - deliveryTotal);
     const commissionAmount = Math.round((subtotal * Math.min(50, Math.max(0, settings.commissionRatePercent))) / 100);
-    db.prepare('UPDATE orders SET subtotal = ?, total_amount = ?, vat_amount = ?, commission_amount = ?, balance_due = ? WHERE id = ?').run(
-      subtotal,
+    await db.prepare('UPDATE orders SET subtotal = ?, total_amount = ?, vat_amount = ?, commission_amount = ?, balance_due = ? WHERE id = ?').run(subtotal,
       netTotal,
       vatAmount,
       commissionAmount,
       cleanTotal,
-      req.params.orderId
-    );
-    db.prepare("UPDATE order_items SET item_status = 'devis_propose' WHERE order_id = ?").run(req.params.orderId);
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+      req.params.orderId);
+    await db.prepare("UPDATE order_items SET item_status = 'devis_propose' WHERE order_id = ?").run(req.params.orderId);
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.orderId,
       'devis_propose',
@@ -2801,7 +2722,7 @@ export function createApiRouter(): Router {
 
     const trackingToken = signOrderTrackingToken(String(orderRow.id), Number(orderRow.tracking_token_version));
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(orderRow.buyer_email),
       subject: `SIMCOVA — Devis chiffré disponible pour ${String(orderRow.order_number)}`,
       bodyText: `Le concessionnaire a établi une offre à ${cleanTotal} FCFA. Consultez votre lien de suivi pour valider le règlement (intégral, acompte ou virement bancaire).`,
@@ -2817,14 +2738,12 @@ export function createApiRouter(): Router {
     const user = req.authUser!;
     const { reason } = req.body as { reason?: string };
 
-    const vendorItem = db
-      .prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.orderId, user.id) as Record<string, unknown> | undefined;
+    const vendorItem = (await db.prepare('SELECT * FROM order_items WHERE order_id = ? AND vendor_id = ? LIMIT 1').get(req.params.orderId, user.id) as Record<string, unknown> | undefined);
     if (!vendorItem) {
       return res.status(403).json({ error: 'Cette commande ne contient aucun de vos articles.' });
     }
 
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined;
+    const order = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.orderId) as Record<string, unknown> | undefined);
     if (!order) return res.status(404).json({ error: 'Commande introuvable.' });
     if (order.payment_status !== 'paid') {
       return res.status(400).json({ error: 'Seule une commande déjà payée peut faire l’objet d’un remboursement.' });
@@ -2833,7 +2752,7 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Cette commande a déjà été livrée. Contactez l’administrateur pour tout litige.' });
     }
 
-    const pay = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(req.params.orderId) as
+    const pay = (await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(req.params.orderId)) as
       | Record<string, unknown>
       | undefined;
 
@@ -2843,16 +2762,16 @@ export function createApiRouter(): Router {
       if (!refund.success) {
         return res.status(502).json({ error: refund.reason || 'Le prestataire de paiement a refusé le remboursement.' });
       }
-      db.prepare("UPDATE payments SET status = 'refunded', updated_at = ? WHERE id = ?").run(
+      await db.prepare("UPDATE payments SET status = 'refunded', updated_at = ? WHERE id = ?").run(
         new Date().toISOString(),
         String(pay.id)
       );
     }
 
     const now = new Date().toISOString();
-    db.prepare("UPDATE orders SET payment_status = 'refunded' WHERE id = ?").run(req.params.orderId);
-    db.prepare("UPDATE order_items SET item_status = 'remboursee' WHERE order_id = ?").run(req.params.orderId);
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    await db.prepare("UPDATE orders SET payment_status = 'refunded' WHERE id = ?").run(req.params.orderId);
+    await db.prepare("UPDATE order_items SET item_status = 'remboursee' WHERE order_id = ?").run(req.params.orderId);
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.orderId,
       'remboursee',
@@ -2863,7 +2782,7 @@ export function createApiRouter(): Router {
 
     const trackingToken = signOrderTrackingToken(String(order.id), Number(order.tracking_token_version));
     const trackingUrl = `${getBaseUrl(req)}/?suivi=${encodeURIComponent(trackingToken)}`;
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(order.buyer_email),
       subject: `SIMCOVA — Remboursement de votre commande ${String(order.order_number)}`,
       bodyText: `Votre commande ${String(order.order_number)} a été annulée et remboursée via Jumia Africa.\nMotif : ${cleanReason}`,
@@ -2871,7 +2790,7 @@ export function createApiRouter(): Router {
       actionLabel: 'Consulter le statut de remboursement',
     });
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: user.id,
       actorEmail: user.email,
       action: 'VENDOR_ORDER_REFUNDED',
@@ -2883,7 +2802,7 @@ export function createApiRouter(): Router {
     res.json({ refunded: true });
   });
 
-  router.post('/vendor/messages/:threadId/reply', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/messages/:threadId/reply', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
     const { body } = req.body as { body?: string };
     if (!body?.trim()) return res.status(400).json({ error: 'Le message est vide.' });
@@ -2894,14 +2813,12 @@ export function createApiRouter(): Router {
       });
     }
 
-    const first = db
-      .prepare('SELECT * FROM messages WHERE thread_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.threadId, user.id) as Record<string, unknown> | undefined;
+    const first = (await db.prepare('SELECT * FROM messages WHERE thread_id = ? AND vendor_id = ? LIMIT 1').get(req.params.threadId, user.id) as Record<string, unknown> | undefined);
     if (!first) return res.status(403).json({ error: 'Fil introuvable ou non autorisé.' });
 
     const now = new Date().toISOString();
-    db.prepare('UPDATE messages SET read_by_vendor = 1 WHERE thread_id = ?').run(req.params.threadId);
-    db.prepare(`
+    await db.prepare('UPDATE messages SET read_by_vendor = 1 WHERE thread_id = ?').run(req.params.threadId);
+    await db.prepare(`
       INSERT INTO messages (id, thread_id, product_id, shop_id, vendor_id, buyer_name, buyer_email, thread_token_version, sender_role, body, read_by_vendor, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'vendor', ?, 1, ?)
     `).run(
@@ -2920,7 +2837,7 @@ export function createApiRouter(): Router {
     const threadToken = signMessageThreadToken(req.params.threadId, Number(first.thread_token_version));
     const threadUrl = `${getBaseUrl(req)}/?fil=${encodeURIComponent(threadToken)}`;
 
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(first.buyer_email),
       subject: 'SIMCOVA — Réponse du vendeur à votre question',
       bodyText: body.trim(),
@@ -2931,44 +2848,36 @@ export function createApiRouter(): Router {
     res.status(201).json({ sent: true, threadUrl });
   });
 
-  router.post('/vendor/messages/:threadId/report', requireAuth, (req: AuthReq, res) => {
+  router.post('/vendor/messages/:threadId/report', requireAuth, async (req: AuthReq, res) => {
     const user = req.authUser!;
-    const first = db
-      .prepare('SELECT * FROM messages WHERE thread_id = ? AND vendor_id = ? LIMIT 1')
-      .get(req.params.threadId, user.id) as Record<string, unknown> | undefined;
+    const first = (await db.prepare('SELECT * FROM messages WHERE thread_id = ? AND vendor_id = ? LIMIT 1').get(req.params.threadId, user.id) as Record<string, unknown> | undefined);
     if (!first) return res.status(403).json({ error: 'Accès interdit.' });
 
-    db.prepare('UPDATE messages SET reported = 1, report_count = report_count + 1 WHERE thread_id = ?').run(
-      req.params.threadId
-    );
-    const rules = getRulesMap();
+    await db.prepare('UPDATE messages SET reported = 1, report_count = report_count + 1 WHERE thread_id = ?').run(req.params.threadId);
+    const rules = await getRulesMap();
     const threshold = Number((rules['RG-07']?.valueJson?.threshold as number) ?? 3);
-    const updatedRow = db
-      .prepare('SELECT MAX(report_count) as rc FROM messages WHERE thread_id = ?')
-      .get(req.params.threadId) as { rc: number } | undefined;
+    const updatedRow = (await db.prepare('SELECT MAX(report_count) as rc FROM messages WHERE thread_id = ?').get(req.params.threadId) as { rc: number } | undefined);
     const autoHidden = Boolean(rules['RG-07']?.enabled && (updatedRow?.rc ?? 0) >= threshold);
     if (autoHidden) {
-      db.prepare('UPDATE messages SET hidden_by_moderation = 1 WHERE thread_id = ?').run(req.params.threadId);
+      await db.prepare('UPDATE messages SET hidden_by_moderation = 1 WHERE thread_id = ?').run(req.params.threadId);
     }
     res.json({ reported: true, autoHidden });
   });
 
   // EXF-604: Vendor public reply (1 reply max per review)
-  router.post('/vendor/reviews/:id/reply', requireAuth, requireActiveVendorWrite, (req: AuthReq, res) => {
+  router.post('/vendor/reviews/:id/reply', requireAuth, requireActiveVendorWrite, async (req: AuthReq, res) => {
     const user = req.authUser!;
     const { reply } = req.body as { reply?: string };
     if (!reply?.trim()) return res.status(400).json({ error: 'Réponse requise.' });
 
-    const rev = db
-      .prepare('SELECT r.*, p.vendor_id FROM reviews r JOIN products p ON p.id = r.product_id WHERE r.id = ?')
-      .get(req.params.id) as Record<string, unknown> | undefined;
+    const rev = (await db.prepare('SELECT r.*, p.vendor_id FROM reviews r JOIN products p ON p.id = r.product_id WHERE r.id = ?').get(req.params.id) as Record<string, unknown> | undefined);
     if (!rev) return res.status(404).json({ error: 'Avis introuvable.' });
     if (rev.vendor_id !== user.id) return res.status(403).json({ error: 'Accès interdit.' });
     if (rev.vendor_reply) {
       return res.status(400).json({ error: 'Vous avez déjà publié une réponse sous cet avis (EXF-604).' });
     }
 
-    db.prepare('UPDATE reviews SET vendor_reply = ?, vendor_replied_at = ? WHERE id = ?').run(
+    await db.prepare('UPDATE reviews SET vendor_reply = ?, vendor_replied_at = ? WHERE id = ?').run(
       reply.trim(),
       new Date().toISOString(),
       req.params.id
@@ -2977,23 +2886,19 @@ export function createApiRouter(): Router {
   });
 
   // EXF-606: Vendor flags abusive review for admin moderation (cannot delete directly)
-  router.post('/vendor/reviews/:id/report', requireAuth, (req: AuthReq, res) => {
-    const rev = db
-      .prepare('SELECT r.*, p.vendor_id FROM reviews r JOIN products p ON p.id = r.product_id WHERE r.id = ?')
-      .get(req.params.id) as Record<string, unknown> | undefined;
+  router.post('/vendor/reviews/:id/report', requireAuth, async (req: AuthReq, res) => {
+    const rev = (await db.prepare('SELECT r.*, p.vendor_id FROM reviews r JOIN products p ON p.id = r.product_id WHERE r.id = ?').get(req.params.id) as Record<string, unknown> | undefined);
     if (!rev) return res.status(404).json({ error: 'Avis introuvable.' });
     if (rev.vendor_id !== req.authUser!.id) return res.status(403).json({ error: 'Accès interdit.' });
 
     const nextCount = Number(rev.report_count) + 1;
-    const rules = getRulesMap();
+    const rules = await getRulesMap();
     const threshold = Number((rules['RG-07']?.valueJson?.threshold as number) ?? 3);
     const nextStatus = rules['RG-07']?.enabled && nextCount >= threshold ? 'retire' : 'signale';
 
-    db.prepare('UPDATE reviews SET report_count = ?, moderation_status = ? WHERE id = ?').run(
-      nextCount,
+    await db.prepare('UPDATE reviews SET report_count = ?, moderation_status = ? WHERE id = ?').run(nextCount,
       nextStatus,
-      req.params.id
-    );
+      req.params.id);
     res.json({ reported: true, moderationStatus: nextStatus });
   });
 
@@ -3001,12 +2906,12 @@ export function createApiRouter(): Router {
   // SUPER ADMIN CONSOLE (EXF-201 .. EXF-210 & CHAPTER 7 RULES)
   // =========================================================================
 
-  router.get('/admin/overview', requireAdmin, (req, res) => {
+  router.get('/admin/overview', requireAdmin, async (req, res) => {
     const period = String(req.query.period || 'all');
     const daysMap: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 };
     const cutoffMs = daysMap[period] ? Date.now() - daysMap[period] * 86_400_000 : 0;
 
-    const allOrders = db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
+    const allOrders = (await db.prepare('SELECT * FROM orders ORDER BY created_at DESC').all() as Array<Record<string, unknown>>);
     const orders = cutoffMs > 0
       ? allOrders.filter((o) => Date.parse(String(o.created_at)) >= cutoffMs)
       : allOrders;
@@ -3043,13 +2948,13 @@ export function createApiRouter(): Router {
     const evolution = Array.from(bucketsMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
       .slice(-8)
-      .map(([, val]) => val);
+      .map(async ([, val]) => val);
 
-    const publishedProducts = (db.prepare("SELECT COUNT(*) as c FROM products WHERE status = 'publie'").get() as { c: number }).c;
-    const activeVendors = (db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'vendor' AND status IN ('valide', 'certifie')").get() as { c: number }).c;
-    const pendingVendors = (db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'vendor' AND status = 'en_attente'").get() as { c: number }).c;
-    const pendingModeration = (db.prepare("SELECT COUNT(*) as c FROM reviews WHERE moderation_status = 'signale'").get() as { c: number }).c;
-    const reportedThreads = (db.prepare('SELECT COUNT(DISTINCT thread_id) as c FROM messages WHERE reported = 1 AND hidden_by_moderation = 0').get() as { c: number }).c;
+    const publishedProducts = (await db.prepare("SELECT COUNT(*) as c FROM products WHERE status = 'publie'").get() as { c: number }).c;
+    const activeVendors = (await db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'vendor' AND status IN ('valide', 'certifie')").get() as { c: number }).c;
+    const pendingVendors = (await db.prepare("SELECT COUNT(*) as c FROM users WHERE role = 'vendor' AND status = 'en_attente'").get() as { c: number }).c;
+    const pendingModeration = (await db.prepare("SELECT COUNT(*) as c FROM reviews WHERE moderation_status = 'signale'").get() as { c: number }).c;
+    const reportedThreads = (await db.prepare('SELECT COUNT(DISTINCT thread_id) as c FROM messages WHERE reported = 1 AND hidden_by_moderation = 0').get() as { c: number }).c;
 
     res.json({
       period,
@@ -3068,27 +2973,21 @@ export function createApiRouter(): Router {
     });
   });
 
-  router.get('/admin/vendors', requireAdmin, (_req, res) => {
-    const vendors = db
-      .prepare(
+  router.get('/admin/vendors', requireAdmin, async (_req, res) => {
+    const vendors = await Promise.all((await db.prepare(
         `SELECT u.*, s.id as shop_id, s.name as shop_name, s.slug as shop_slug, s.city as shop_city,
           (SELECT COUNT(*) FROM products p WHERE p.vendor_id = u.id AND p.status = 'publie') as published_count
          FROM users u LEFT JOIN shops s ON s.vendor_id = u.id
          WHERE u.role = 'vendor'
          ORDER BY CASE u.status WHEN 'en_attente' THEN 0 WHEN 'valide' THEN 1 WHEN 'certifie' THEN 2 ELSE 3 END, u.created_at DESC`
-      )
-      .all()
-      .map((r: Record<string, unknown>) => ({
+    ).all()).map(async (r: Record<string, unknown>) => ({
         ...mapUserRow(r),
         shopId: r.shop_id ? String(r.shop_id) : null,
         shopName: r.shop_name ? String(r.shop_name) : null,
         shopSlug: r.shop_slug ? String(r.shop_slug) : null,
         shopCity: r.shop_city ? String(r.shop_city) : null,
         publishedCount: Number(r.published_count || 0),
-        kycDocs: db
-          .prepare('SELECT id, vendor_id, doc_type, file_name, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC')
-          .all(String(r.id))
-          .map((d: Record<string, unknown>) => ({
+        kycDocs: (await db.prepare('SELECT id, vendor_id, doc_type, file_name, mime_type, review_status, rejection_reason, uploaded_at, reviewed_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC').all(String(r.id))).map((d: Record<string, unknown>) => ({
             id: String(d.id),
             vendorId: String(d.vendor_id),
             docType: String(d.doc_type),
@@ -3100,14 +2999,14 @@ export function createApiRouter(): Router {
             reviewedAt: d.reviewed_at ? String(d.reviewed_at) : null,
             purgeScheduledAt: d.purge_scheduled_at ? String(d.purge_scheduled_at) : null,
           })),
-      }));
+      })));
 
     res.json({ vendors });
   });
 
   // EXF-203 / EXF-104: Restricted in-place decryption viewer for Admin only (no auto-download)
-  router.get('/admin/kyc/:docId/view', requireAdmin, (req: AuthReq, res) => {
-    const doc = db.prepare('SELECT * FROM kyc_documents WHERE id = ?').get(req.params.docId) as
+  router.get('/admin/kyc/:docId/view', requireAdmin, async (req: AuthReq, res) => {
+    const doc = (await db.prepare('SELECT * FROM kyc_documents WHERE id = ?').get(req.params.docId)) as
       | Record<string, unknown>
       | undefined;
     if (!doc) return res.status(404).json({ error: 'Pièce justificative introuvable ou purgée.' });
@@ -3123,7 +3022,7 @@ export function createApiRouter(): Router {
       });
     }
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'KYC_VIEWED',
@@ -3145,13 +3044,13 @@ export function createApiRouter(): Router {
   });
 
   // EXNF-05: Purge sensitive KYC content after review
-  router.post('/admin/kyc/:docId/purge', requireAdmin, (req: AuthReq, res) => {
-    const doc = db.prepare('SELECT id, doc_type FROM kyc_documents WHERE id = ?').get(req.params.docId) as
+  router.post('/admin/kyc/:docId/purge', requireAdmin, async (req: AuthReq, res) => {
+    const doc = (await db.prepare('SELECT id, doc_type FROM kyc_documents WHERE id = ?').get(req.params.docId)) as
       | { id: string; doc_type: string }
       | undefined;
     if (!doc) return res.status(404).json({ error: 'Pièce introuvable.' });
-    db.prepare('DELETE FROM kyc_documents WHERE id = ?').run(doc.id);
-    writeAuditLog({
+    await db.prepare('DELETE FROM kyc_documents WHERE id = ?').run(doc.id);
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'KYC_PURGED',
@@ -3163,7 +3062,7 @@ export function createApiRouter(): Router {
   });
 
   // EXF-105 / EXF-106 / EXF-203: Validate, reject with reason, certify, or suspend vendor
-  router.post('/admin/vendors/:id/decision', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/vendors/:id/decision', requireAdmin, async (req: AuthReq, res) => {
     const { status, reason, badges } = req.body as {
       status?: VendorStatus;
       reason?: string;
@@ -3174,7 +3073,7 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Décision invalide.' });
     }
 
-    const vendor = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'vendor'").get(req.params.id) as
+    const vendor = (await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'vendor'").get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
     if (!vendor) return res.status(404).json({ error: 'Vendeur introuvable.' });
@@ -3192,17 +3091,15 @@ export function createApiRouter(): Router {
     }
 
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       UPDATE users SET status = ?, rejection_reason = ?, badges_json = ? WHERE id = ?
     `).run(status, reason?.trim() || null, JSON.stringify([...currentBadges]), req.params.id);
 
     if (status === 'valide' || status === 'certifie') {
-      db.prepare("UPDATE kyc_documents SET review_status = 'approuve', reviewed_at = ? WHERE vendor_id = ? AND review_status = 'en_attente'").run(
-        now,
-        req.params.id
-      );
+      await db.prepare("UPDATE kyc_documents SET review_status = 'approuve', reviewed_at = ? WHERE vendor_id = ? AND review_status = 'en_attente'").run(now,
+        req.params.id);
     } else if (status === 'rejete') {
-      db.prepare("UPDATE kyc_documents SET review_status = 'rejete', rejection_reason = ?, reviewed_at = ? WHERE vendor_id = ? AND review_status = 'en_attente'").run(
+      await db.prepare("UPDATE kyc_documents SET review_status = 'rejete', rejection_reason = ?, reviewed_at = ? WHERE vendor_id = ? AND review_status = 'en_attente'").run(
         reason?.trim() || 'Pièce non conforme',
         now,
         req.params.id
@@ -3217,7 +3114,7 @@ export function createApiRouter(): Router {
       suspendu: 'Compte suspendu (boutique et produits masqués)',
     };
 
-    queueTransactionalEmail({
+    await queueTransactionalEmail({
       toEmail: String(vendor.email),
       subject: `SIMCOVA — Statut de votre compte vendeur : ${labels[status]}`,
       bodyText: `Décision de l’administration : ${labels[status]}.${reason ? `\nMotif : ${reason}` : ''}`,
@@ -3225,7 +3122,7 @@ export function createApiRouter(): Router {
       actionLabel: null,
     });
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: `VENDOR_${status.toUpperCase()}`,
@@ -3238,13 +3135,13 @@ export function createApiRouter(): Router {
   });
 
   // Chapter 7 Rules RG-01 .. RG-10
-  router.get('/admin/rules', requireAdmin, (_req, res) => {
-    res.json({ rules: Object.values(getRulesMap()) });
+  router.get('/admin/rules', requireAdmin, async (_req, res) => {
+    res.json({ rules: Object.values(await getRulesMap()) });
   });
 
-  router.put('/admin/rules/:ruleId', requireAdmin, (req: AuthReq, res) => {
+  router.put('/admin/rules/:ruleId', requireAdmin, async (req: AuthReq, res) => {
     const ruleId = req.params.ruleId as RuleId;
-    const existing = db.prepare('SELECT * FROM platform_rules WHERE rule_id = ?').get(ruleId) as
+    const existing = (await db.prepare('SELECT * FROM platform_rules WHERE rule_id = ?').get(ruleId)) as
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Règle introuvable.' });
@@ -3254,11 +3151,11 @@ export function createApiRouter(): Router {
     const nextValue = valueJson !== undefined ? JSON.stringify(valueJson) : String(existing.value_json);
     const now = new Date().toISOString();
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE platform_rules SET enabled = ?, value_json = ?, updated_by = ?, updated_at = ? WHERE rule_id = ?
     `).run(nextEnabled, nextValue, req.authUser!.email, now, ruleId);
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'RULE_UPDATED',
@@ -3268,33 +3165,33 @@ export function createApiRouter(): Router {
     });
 
     // Notify existing vendors when a rule affecting them changes (Chapter 7)
-    const vendors = db.prepare("SELECT email FROM users WHERE role = 'vendor' AND status != 'suspendu'").all() as Array<{
+    const vendors = (await db.prepare("SELECT email FROM users WHERE role = 'vendor' AND status != 'suspendu'").all() as Array<{
       email: string;
-    }>;
+    }>);
     for (const v of vendors) {
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: v.email,
         subject: `SIMCOVA — Évolution de règle plateforme (${ruleId})`,
         bodyText: `La règle « ${String(existing.title)} » est désormais ${nextEnabled ? 'activée' : 'désactivée'}. Consultez votre espace vendeur pour vérifier la conformité de vos fiches.`,
       });
     }
 
-    res.json({ rules: Object.values(getRulesMap()) });
+    res.json({ rules: Object.values(await getRulesMap()) });
   });
 
   // EXF-206: Categories CRUD
-  router.post('/admin/categories', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/categories', requireAdmin, async (req: AuthReq, res) => {
     const { name, requiredBadge } = req.body as { name?: string; requiredBadge?: string | null };
     if (!name?.trim()) return res.status(400).json({ error: 'Nom de catégorie requis.' });
     const slug = slugify(name);
     const id = `cat-${slug}-${crypto.randomBytes(2).toString('hex')}`;
-    db.prepare('INSERT INTO categories (id, name, slug, active, forbidden, required_badge) VALUES (?, ?, ?, 1, 0, ?)').run(
+    await db.prepare('INSERT INTO categories (id, name, slug, active, forbidden, required_badge) VALUES (?, ?, ?, 1, 0, ?)').run(
       id,
       name.trim(),
       `${slug}-${id.slice(-4)}`,
       requiredBadge || null
     );
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'CATEGORY_CREATED',
@@ -3305,14 +3202,14 @@ export function createApiRouter(): Router {
     res.status(201).json({ id });
   });
 
-  router.put('/admin/categories/:id', requireAdmin, (req: AuthReq, res) => {
+  router.put('/admin/categories/:id', requireAdmin, async (req: AuthReq, res) => {
     const { name, active, forbidden, requiredBadge } = req.body as {
       name?: string;
       active?: boolean;
       forbidden?: boolean;
       requiredBadge?: string | null;
     };
-    const existing = db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id) as
+    const existing = (await db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Catégorie introuvable.' });
@@ -3326,7 +3223,7 @@ export function createApiRouter(): Router {
           ? String(existing.required_badge)
           : null;
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE categories SET
         name = COALESCE(?, name),
         active = COALESCE(?, active),
@@ -3340,7 +3237,7 @@ export function createApiRouter(): Router {
       nextBadge,
       req.params.id
     );
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'CATEGORY_UPDATED',
@@ -3352,15 +3249,12 @@ export function createApiRouter(): Router {
   });
 
   // EXF-207: Moderation (Reviews & Reported Message Threads)
-  router.get('/admin/moderation', requireAdmin, (_req, res) => {
-    const reviews = db
-      .prepare(
+  router.get('/admin/moderation', requireAdmin, async (_req, res) => {
+    const reviews = (await db.prepare(
         `SELECT r.*, p.title as product_title
          FROM reviews r JOIN products p ON p.id = r.product_id
          ORDER BY CASE r.moderation_status WHEN 'signale' THEN 0 ELSE 1 END, r.created_at DESC`
-      )
-      .all()
-      .map((r: Record<string, unknown>) => ({
+      ).all()).map((r: Record<string, unknown>) => ({
         id: String(r.id),
         productId: String(r.product_id),
         productTitle: String(r.product_title),
@@ -3374,17 +3268,14 @@ export function createApiRouter(): Router {
         createdAt: String(r.created_at),
       }));
 
-    const threads = db
-      .prepare(
+    const threads = (await db.prepare(
         `SELECT m.thread_id, m.buyer_name, m.buyer_email, s.name as shop_name, m.body, m.reported, m.report_count, m.hidden_by_moderation, m.created_at,
           EXISTS(SELECT 1 FROM blocked_threads bt WHERE bt.thread_id = m.thread_id) as is_blocked
          FROM messages m
          JOIN shops s ON s.id = m.shop_id
          WHERE m.id IN (SELECT MAX(id) FROM messages GROUP BY thread_id)
          ORDER BY m.reported DESC, m.created_at DESC`
-      )
-      .all()
-      .map((t: Record<string, unknown>) => ({
+      ).all()).map((t: Record<string, unknown>) => ({
         threadId: String(t.thread_id),
         buyerName: String(t.buyer_name),
         buyerEmail: String(t.buyer_email),
@@ -3400,13 +3291,13 @@ export function createApiRouter(): Router {
     res.json({ reviews, threads });
   });
 
-  router.post('/admin/moderation/reviews/:id', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/moderation/reviews/:id', requireAdmin, async (req: AuthReq, res) => {
     const { status } = req.body as { status?: 'visible' | 'retire' };
     if (!status || !['visible', 'retire'].includes(status)) {
       return res.status(400).json({ error: 'Statut invalide.' });
     }
-    db.prepare('UPDATE reviews SET moderation_status = ? WHERE id = ?').run(status, req.params.id);
-    writeAuditLog({
+    (await db.prepare('UPDATE reviews SET moderation_status = ? WHERE id = ?').run(status, req.params.id));
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: `REVIEW_${status.toUpperCase()}`,
@@ -3417,21 +3308,21 @@ export function createApiRouter(): Router {
     res.json({ updated: true });
   });
 
-  router.post('/admin/moderation/threads/:threadId/block', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/moderation/threads/:threadId/block', requireAdmin, async (req: AuthReq, res) => {
     const { block, reason } = req.body as { block?: boolean; reason?: string };
     if (block) {
-      db.prepare('INSERT OR REPLACE INTO blocked_threads (thread_id, blocked_by, reason, created_at) VALUES (?, ?, ?, ?)').run(
+      await db.prepare('INSERT OR REPLACE INTO blocked_threads (thread_id, blocked_by, reason, created_at) VALUES (?, ?, ?, ?)').run(
         req.params.threadId,
         req.authUser!.email,
         reason || 'Comportement abusif signalé',
         new Date().toISOString()
       );
-      db.prepare('UPDATE messages SET hidden_by_moderation = 1 WHERE thread_id = ?').run(req.params.threadId);
+      await db.prepare('UPDATE messages SET hidden_by_moderation = 1 WHERE thread_id = ?').run(req.params.threadId);
     } else {
-      db.prepare('DELETE FROM blocked_threads WHERE thread_id = ?').run(req.params.threadId);
-      db.prepare('UPDATE messages SET hidden_by_moderation = 0, reported = 0 WHERE thread_id = ?').run(req.params.threadId);
+      await db.prepare('DELETE FROM blocked_threads WHERE thread_id = ?').run(req.params.threadId);
+      await db.prepare('UPDATE messages SET hidden_by_moderation = 0, reported = 0 WHERE thread_id = ?').run(req.params.threadId);
     }
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: block ? 'THREAD_BLOCKED' : 'THREAD_UNBLOCKED',
@@ -3443,8 +3334,8 @@ export function createApiRouter(): Router {
   });
 
   // EXF-208 / EXF-608 / EXF-610: Admin Push Alerts Broadcast + History
-  router.get('/admin/push-alerts', requireAdmin, (_req, res) => {
-    const alerts = db.prepare('SELECT * FROM push_alerts ORDER BY created_at DESC LIMIT 30').all().map((a: Record<string, unknown>) => ({
+  router.get('/admin/push-alerts', requireAdmin, async (_req, res) => {
+    const alerts = (await db.prepare('SELECT * FROM push_alerts ORDER BY created_at DESC LIMIT 30').all()).map((a: Record<string, unknown>) => ({
       id: String(a.id),
       title: String(a.title),
       body: String(a.body),
@@ -3454,11 +3345,11 @@ export function createApiRouter(): Router {
       createdBy: String(a.created_by),
       createdAt: String(a.created_at),
     }));
-    const subscriberCount = (db.prepare('SELECT COUNT(*) as c FROM push_subscriptions').get() as { c: number }).c;
+    const subscriberCount = (await db.prepare('SELECT COUNT(*) as c FROM push_subscriptions').get() as { c: number }).c;
     res.json({ alerts, subscriberCount, liveConnections: sseClients.size });
   });
 
-  router.post('/admin/push-alerts', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/push-alerts', requireAdmin, async (req: AuthReq, res) => {
     const { title, body, deepLink, alertType } = req.body as {
       title?: string;
       body?: string;
@@ -3469,9 +3360,9 @@ export function createApiRouter(): Router {
       return res.status(400).json({ error: 'Titre et message de l’alerte requis.' });
     }
     const type = alertType || 'nouveautes';
-    const subs = db.prepare('SELECT preferences_json FROM push_subscriptions').all() as Array<{
+    const subs = (await db.prepare('SELECT preferences_json FROM push_subscriptions').all() as Array<{
       preferences_json: string;
-    }>;
+    }>);
     const eligibleSubs = subs.filter((s) => {
       const prefs = JSON.parse(s.preferences_json || '{}');
       return prefs[type] !== false;
@@ -3489,14 +3380,14 @@ export function createApiRouter(): Router {
       createdAt: new Date().toISOString(),
     };
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO push_alerts (id, title, body, deep_link, alert_type, sent_count, created_by, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(alert.id, alert.title, alert.body, alert.deepLink, alert.alertType, alert.sentCount, alert.createdBy, alert.createdAt);
 
     broadcastSseAlert(alert);
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'PUSH_ALERT_SENT',
@@ -3509,20 +3400,18 @@ export function createApiRouter(): Router {
   });
 
   // EXF-506 / EXF-507: Orders, Transactions & Refunds (+ search & filters)
-  router.get('/admin/orders', requireAdmin, (req, res) => {
+  router.get('/admin/orders', requireAdmin, async (req, res) => {
     const q = req.query.q ? String(req.query.q).toLowerCase().trim() : '';
     const status = req.query.status ? String(req.query.status) : '';
     const mode = req.query.mode ? String(req.query.mode) : '';
     const from = req.query.from ? Date.parse(String(req.query.from)) : 0;
     const to = req.query.to ? Date.parse(String(req.query.to)) + 86_400_000 : Number.MAX_SAFE_INTEGER;
 
-    const rows = db
-      .prepare(
+    const rows = (await db.prepare(
         `SELECT o.*, p.provider_ref, p.status as tx_status, p.method as tx_method
          FROM orders o LEFT JOIN payments p ON p.order_id = o.id
          ORDER BY o.created_at DESC`
-      )
-      .all() as Array<Record<string, unknown>>;
+      ).all() as Array<Record<string, unknown>>);
 
     const orders = rows
       .filter((o) => {
@@ -3548,9 +3437,9 @@ export function createApiRouter(): Router {
 
   router.post('/admin/orders/:id/refund', requireAdmin, async (req: AuthReq, res) => {
     const { reason } = req.body as { reason?: string };
-    const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined;
+    const order = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(req.params.id) as Record<string, unknown> | undefined);
     if (!order) return res.status(404).json({ error: 'Commande introuvable.' });
-    const pay = db.prepare('SELECT * FROM payments WHERE order_id = ?').get(req.params.id) as
+    const pay = (await db.prepare('SELECT * FROM payments WHERE order_id = ?').get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
 
@@ -3559,16 +3448,16 @@ export function createApiRouter(): Router {
       if (!refund.success) {
         return res.status(502).json({ error: refund.reason || 'Le prestataire de paiement a refusé le remboursement.' });
       }
-      db.prepare("UPDATE payments SET status = 'refunded', updated_at = ? WHERE id = ?").run(
+      await db.prepare("UPDATE payments SET status = 'refunded', updated_at = ? WHERE id = ?").run(
         new Date().toISOString(),
         String(pay.id)
       );
     }
 
     const now = new Date().toISOString();
-    db.prepare("UPDATE orders SET payment_status = 'refunded' WHERE id = ?").run(req.params.id);
-    db.prepare("UPDATE order_items SET item_status = 'remboursee' WHERE order_id = ?").run(req.params.id);
-    db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    await db.prepare("UPDATE orders SET payment_status = 'refunded' WHERE id = ?").run(req.params.id);
+    await db.prepare("UPDATE order_items SET item_status = 'remboursee' WHERE order_id = ?").run(req.params.id);
+    await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
       `ev-${crypto.randomUUID().slice(0, 8)}`,
       req.params.id,
       'remboursee',
@@ -3577,7 +3466,7 @@ export function createApiRouter(): Router {
       now
     );
 
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'ORDER_REFUNDED',
@@ -3590,7 +3479,7 @@ export function createApiRouter(): Router {
   });
 
   // EXF-209: CSV Exports (+ période arbitraire + export comptable)
-  router.get('/admin/export/:type', requireAdmin, (req, res) => {
+  router.get('/admin/export/:type', requireAdmin, async (req, res) => {
     const type = req.params.type;
     const escapeCsv = (val: unknown) => `"${String(val ?? '').replace(/"/g, '""')}"`;
     const from = req.query.from ? String(req.query.from) : '';
@@ -3612,11 +3501,10 @@ export function createApiRouter(): Router {
     let csv = '';
     if (type === 'orders') {
       const { conds, params } = dateFilter('created_at');
-      const rows = db
-        .prepare(
+      const rows = (await db.prepare(
           `SELECT order_number, buyer_name, buyer_email, delivery_zone, total_amount, vat_amount, commission_amount, payment_method, payment_status, created_at FROM orders ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY created_at DESC`
         )
-        .all(...(params as [])) as Array<Record<string, unknown>>;
+        .all(...(params as [])) as Array<Record<string, unknown>>);
       csv = 'Numero,Acheteur,Courriel,Zone,Total_HT,TVA,TTC,Commission,Mode_Paiement,Statut,Date\n';
       csv += rows
         .map((r) => {
@@ -3628,26 +3516,24 @@ export function createApiRouter(): Router {
         })
         .join('\n');
     } else if (type === 'vendors') {
-      const rows = db.prepare("SELECT u.full_name, u.email, u.status, s.name as shop_name, s.city, u.created_at FROM users u LEFT JOIN shops s ON s.vendor_id = u.id WHERE u.role = 'vendor'").all() as Array<Record<string, unknown>>;
+      const rows = (await db.prepare("SELECT u.full_name, u.email, u.status, s.name as shop_name, s.city, u.created_at FROM users u LEFT JOIN shops s ON s.vendor_id = u.id WHERE u.role = 'vendor'").all() as Array<Record<string, unknown>>);
       csv = 'Nom,Courriel,Statut,Boutique,Ville,Date_Inscription\n';
       csv += rows.map((r) => [r.full_name, r.email, r.status, r.shop_name, r.city, r.created_at].map(escapeCsv).join(',')).join('\n');
     } else if (type === 'transactions') {
       const { conds, params } = dateFilter('p.created_at');
-      const rows = db
-        .prepare(
+      const rows = (await db.prepare(
           `SELECT p.provider_ref, o.order_number, p.provider, p.method, p.amount, p.status, p.created_at FROM payments p JOIN orders o ON o.id = p.order_id ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY p.created_at DESC`
         )
-        .all(...(params as [])) as Array<Record<string, unknown>>;
+        .all(...(params as [])) as Array<Record<string, unknown>>);
       csv = 'Reference_PSP,Commande,Prestataire,Methode,Montant_FCFA,Statut,Date\n';
       csv += rows.map((r) => [r.provider_ref, r.order_number, r.provider, r.method, r.amount, r.status, r.created_at].map(escapeCsv).join(',')).join('\n');
     } else if (type === 'accounting') {
       // Accounting export: one line per order with the full platform take (period filter supported)
       const { conds, params } = dateFilter('created_at');
-      const rows = db
-        .prepare(
+      const rows = (await db.prepare(
           `SELECT order_number, created_at, buyer_email, payment_method, payment_status, subtotal, delivery_total, total_amount, vat_amount, commission_amount, paid_amount FROM orders ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY created_at ASC`
         )
-        .all(...(params as [])) as Array<Record<string, unknown>>;
+        .all(...(params as [])) as Array<Record<string, unknown>>);
       csv = 'Date,Commande,Acheteur,Moyen,Statut,Sous_total_Produits,Livraison,Total_HT,TVA,TTC,Commission_Plateforme,Net_Vendeurs,Encaisse\n';
       let sumHT = 0, sumVat = 0, sumGrand = 0, sumCom = 0, sumNet = 0;
       for (const r of rows) {
@@ -3662,13 +3548,13 @@ export function createApiRouter(): Router {
       }
       csv += ['TOTAL', '', '', '', '', '', '', sumHT, sumVat, sumGrand, sumCom, sumNet, ''].map(escapeCsv).join(',') + '\n';
     } else if (type === 'buyers') {
-      const buyers = getAdminBuyers({}).buyers;
+      const buyers = (await getAdminBuyers({})).buyers;
       csv = 'Courriel,Nom,Zone,Commandes,Payees,Depense_TTC,Panier_Moyen,Premiere_Commande,Derniere_Commande,Remboursements,Devis\n';
       csv += buyers
         .map((b) => [b.email, b.name, b.zone, b.orders, b.paidOrders, b.spent, b.avgBasket, b.firstAt, b.lastAt, b.refunded, b.customOrders].map(escapeCsv).join(','))
         .join('\n');
     } else if (type === 'audit') {
-      const rows = db.prepare('SELECT created_at, actor_email, action, target_type, target_id, details FROM audit_logs ORDER BY created_at DESC').all() as Array<Record<string, unknown>>;
+      const rows = (await db.prepare('SELECT created_at, actor_email, action, target_type, target_id, details FROM audit_logs ORDER BY created_at DESC').all() as Array<Record<string, unknown>>);
       csv = 'Date,Acteur,Action,Cible,Identifiant,Details\n';
       csv += rows.map((r) => [r.created_at, r.actor_email, r.action, r.target_type, r.target_id, r.details].map(escapeCsv).join(',')).join('\n');
     } else {
@@ -3681,9 +3567,9 @@ export function createApiRouter(): Router {
   });
 
   // EXF-210: Platform Settings
-  router.put('/admin/settings', requireAdmin, (req: AuthReq, res) => {
+  router.put('/admin/settings', requireAdmin, async (req: AuthReq, res) => {
     const s = req.body as Partial<PlatformSettings>;
-    db.prepare(`
+    await db.prepare(`
       UPDATE platform_settings SET
         currency = COALESCE(?, currency),
         default_delivery_policy = COALESCE(?, default_delivery_policy),
@@ -3714,7 +3600,7 @@ export function createApiRouter(): Router {
       s.vatRatePercent !== undefined ? Math.min(50, Math.max(0, Math.round(Number(s.vatRatePercent)))) : null,
       s.maintenanceMode !== undefined ? (s.maintenanceMode ? 1 : 0) : null
     );
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'SETTINGS_UPDATED',
@@ -3722,7 +3608,7 @@ export function createApiRouter(): Router {
       targetId: '1',
       details: 'Mise à jour des paramètres généraux, seuils d’acompte / virement et mentions légales',
     });
-    res.json({ settings: getPlatformSettings() });
+    res.json({ settings: await getPlatformSettings() });
   });
 
   // =========================================================================
@@ -3733,8 +3619,8 @@ export function createApiRouter(): Router {
     value === '7d' || value === '30d' || value === '90d' ? value : 'all';
 
   // Exhaustive, filterable transaction ledger with the platform take (HT/TVA/TTC/commission/net)
-  router.get('/admin/transactions', requireAdmin, (req, res) => {
-    const result = getAdminTransactions({
+  router.get('/admin/transactions', requireAdmin, async (req, res) => {
+    const result = await getAdminTransactions({
       period: parsePeriod(req.query.period),
       from: req.query.from ? String(req.query.from) : undefined,
       to: req.query.to ? String(req.query.to) : undefined,
@@ -3749,11 +3635,11 @@ export function createApiRouter(): Router {
   });
 
   // Vendor payout statements (net = revenue - attributed commission) & recorded payouts
-  router.get('/admin/payouts', requireAdmin, (req, res) => {
-    res.json(getAdminPayouts({ period: parsePeriod(req.query.period) }));
+  router.get('/admin/payouts', requireAdmin, async (req, res) => {
+    res.json(await getAdminPayouts({ period: parsePeriod(req.query.period) }));
   });
 
-  router.post('/admin/payouts', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/payouts', requireAdmin, async (req: AuthReq, res) => {
     const { vendorId, amount, method, reference, note, periodStart, periodEnd } = req.body as {
       vendorId?: string;
       amount?: number;
@@ -3764,7 +3650,7 @@ export function createApiRouter(): Router {
       periodEnd?: string;
     };
     if (!vendorId) return res.status(400).json({ error: 'Vendeur requis.' });
-    const result = recordVendorPayout({
+    const result = await recordVendorPayout({
       vendorId,
       amount: Number(amount || 0),
       method,
@@ -3780,14 +3666,14 @@ export function createApiRouter(): Router {
   });
 
   // Aggregated KPIs, tops, commission splits, delays & distributions
-  router.get('/admin/analytics', requireAdmin, (req, res) => {
-    res.json(getAdminAnalytics({ period: parsePeriod(req.query.period) }));
+  router.get('/admin/analytics', requireAdmin, async (req, res) => {
+    res.json(await getAdminAnalytics({ period: parsePeriod(req.query.period) }));
   });
 
   // Guest buyer directory aggregated by email
-  router.get('/admin/buyers', requireAdmin, (req, res) => {
+  router.get('/admin/buyers', requireAdmin, async (req, res) => {
     res.json(
-      getAdminBuyers({
+      await getAdminBuyers({
         q: req.query.q ? String(req.query.q).trim() : undefined,
         minOrders: req.query.minOrders ? Number(req.query.minOrders) : undefined,
       })
@@ -3795,8 +3681,8 @@ export function createApiRouter(): Router {
   });
 
   // Order 360° detail (timeline, items with custom specs, full money breakdown)
-  router.get('/admin/orders/:id', requireAdmin, (req, res) => {
-    const detail = getAdminOrderDetail(req.params.id);
+  router.get('/admin/orders/:id', requireAdmin, async (req, res) => {
+    const detail = await getAdminOrderDetail(req.params.id);
     if (!detail) return res.status(404).json({ error: 'Commande introuvable.' });
     res.json(detail);
   });
@@ -3806,13 +3692,12 @@ export function createApiRouter(): Router {
   // =========================================================================
 
   // Global product list (all vendors) with filters + admin archive action
-  router.get('/admin/products', requireAdmin, (req, res) => {
+  router.get('/admin/products', requireAdmin, async (req, res) => {
     const status = req.query.status ? String(req.query.status) : '';
     const vendorId = req.query.vendorId ? String(req.query.vendorId) : '';
     const q = req.query.q ? String(req.query.q).toLowerCase().trim() : '';
 
-    const rows = db
-      .prepare(
+    const rows = (await db.prepare(
         `SELECT p.*, u.full_name AS vendor_name, s.name AS shop_name, s.slug AS shop_slug, c.name AS category_name,
           COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as rating_average,
           COALESCE((SELECT COUNT(r.id) FROM reviews r WHERE r.product_id = p.id AND r.moderation_status = 'visible'), 0) as review_count
@@ -3821,11 +3706,10 @@ export function createApiRouter(): Router {
          LEFT JOIN shops s ON s.vendor_id = p.vendor_id
          JOIN categories c ON c.id = p.category_id
          ORDER BY p.updated_at DESC`
-      )
-      .all() as Array<Record<string, unknown>>;
+      ).all() as Array<Record<string, unknown>>);
 
     const products = rows
-      .filter((p) => {
+      .filter(async (p) => {
         if (status && String(p.status) !== status) return false;
         if (vendorId && String(p.vendor_id) !== vendorId) return false;
         if (q) {
@@ -3833,7 +3717,7 @@ export function createApiRouter(): Router {
           if (!hay.includes(q)) return false;
         }
         return true;
-        function u_name(row: Record<string, unknown>) {
+        async function u_name(row: Record<string, unknown>) {
           return String(row.vendor_name || '');
         }
       })
@@ -3856,16 +3740,16 @@ export function createApiRouter(): Router {
     res.json({ products, totals: { count: products.length, published: products.filter((p) => p.status === 'publie').length } });
   });
 
-  router.post('/admin/products/:id/archive', requireAdmin, (req: AuthReq, res) => {
-    const existing = db.prepare('SELECT id, title, vendor_id FROM products WHERE id = ?').get(req.params.id) as
+  router.post('/admin/products/:id/archive', requireAdmin, async (req: AuthReq, res) => {
+    const existing = (await db.prepare('SELECT id, title, vendor_id FROM products WHERE id = ?').get(req.params.id)) as
       | { id: string; title: string; vendor_id: string }
       | undefined;
     if (!existing) return res.status(404).json({ error: 'Produit introuvable.' });
-    db.prepare("UPDATE products SET status = 'archive', updated_at = ? WHERE id = ?").run(
+    await db.prepare("UPDATE products SET status = 'archive', updated_at = ? WHERE id = ?").run(
       new Date().toISOString(),
       req.params.id
     );
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'PRODUCT_ARCHIVED_BY_ADMIN',
@@ -3877,22 +3761,20 @@ export function createApiRouter(): Router {
   });
 
   // Vendor 360°: profile, shop, KPIs, KYC, decision history & recent orders
-  router.get('/admin/vendors/:id/detail', requireAdmin, (req, res) => {
-    const vendorRow = db.prepare("SELECT * FROM users WHERE id = ? AND role = 'vendor'").get(req.params.id) as
+  router.get('/admin/vendors/:id/detail', requireAdmin, async (req, res) => {
+    const vendorRow = (await db.prepare("SELECT * FROM users WHERE id = ? AND role = 'vendor'").get(req.params.id)) as
       | Record<string, unknown>
       | undefined;
     if (!vendorRow) return res.status(404).json({ error: 'Vendeur introuvable.' });
-    const shopRow = db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.params.id) as Record<string, unknown> | undefined;
+    const shopRow = (await db.prepare('SELECT * FROM shops WHERE vendor_id = ?').get(req.params.id) as Record<string, unknown> | undefined);
 
-    const items = db
-      .prepare('SELECT * FROM order_items WHERE vendor_id = ?')
-      .all(req.params.id) as Array<Record<string, unknown>>;
+    const items = (await db.prepare('SELECT * FROM order_items WHERE vendor_id = ?').all(req.params.id) as Array<Record<string, unknown>>);
     const paidItems = items.filter(() => true);
     void paidItems;
     const orderIds = [...new Set(items.map((i) => String(i.order_id)))];
     const ordersById = new Map<string, Record<string, unknown>>();
     for (const oid of orderIds) {
-      const o = db.prepare('SELECT * FROM orders WHERE id = ?').get(oid) as Record<string, unknown> | undefined;
+      const o = (await db.prepare('SELECT * FROM orders WHERE id = ?').get(oid) as Record<string, unknown> | undefined);
       if (o) ordersById.set(oid, o);
     }
     const paidOrderIds = new Set(
@@ -3911,10 +3793,7 @@ export function createApiRouter(): Router {
     }
     const refundedOrders = [...ordersById.values()].filter((o) => String(o.payment_status) === 'refunded').length;
 
-    const kycDocs = db
-      .prepare('SELECT id, doc_type, file_name, review_status, uploaded_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC')
-      .all(req.params.id)
-      .map((d: Record<string, unknown>) => ({
+    const kycDocs = (await db.prepare('SELECT id, doc_type, file_name, review_status, uploaded_at, purge_scheduled_at FROM kyc_documents WHERE vendor_id = ? ORDER BY uploaded_at DESC').all(req.params.id)).map((d: Record<string, unknown>) => ({
         id: String(d.id),
         docType: String(d.doc_type),
         fileName: String(d.file_name),
@@ -3923,19 +3802,16 @@ export function createApiRouter(): Router {
         purgeScheduledAt: d.purge_scheduled_at ? String(d.purge_scheduled_at) : null,
       }));
 
-    const decisions = db
-      .prepare("SELECT action, details, actor_email, created_at FROM audit_logs WHERE target_type = 'user' AND target_id = ? ORDER BY created_at DESC LIMIT 15")
-      .all(req.params.id)
-      .map((a: Record<string, unknown>) => ({
+    const decisions = (await db.prepare("SELECT action, details, actor_email, created_at FROM audit_logs WHERE target_type = 'user' AND target_id = ? ORDER BY created_at DESC LIMIT 15").all(req.params.id)).map((a: Record<string, unknown>) => ({
         action: String(a.action),
         details: String(a.details),
         actorEmail: String(a.actor_email),
         createdAt: String(a.created_at),
       }));
 
-    const payoutsTotal = (db.prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM vendor_payouts WHERE vendor_id = ?').get(req.params.id) as { total: number }).total;
+    const payoutsTotal = (await db.prepare('SELECT COALESCE(SUM(amount), 0) AS total FROM vendor_payouts WHERE vendor_id = ?').get(req.params.id) as { total: number }).total;
 
-    const reviews = db.prepare("SELECT rating FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.vendor_id = ? AND r.moderation_status = 'visible'").all(req.params.id) as Array<{ rating: number }>;
+    const reviews = (await db.prepare("SELECT rating FROM reviews r JOIN products p ON p.id = r.product_id WHERE p.vendor_id = ? AND r.moderation_status = 'visible'").all(req.params.id) as Array<{ rating: number }>);
     const avgRating = reviews.length ? Number((reviews.reduce((s, r) => s + r.rating, 0) / reviews.length).toFixed(1)) : 0;
 
     res.json({
@@ -3952,7 +3828,7 @@ export function createApiRouter(): Router {
         refundRatePct: orderIds.length ? Math.round((refundedOrders / orderIds.length) * 1000) / 10 : 0,
         avgRating,
         reviewCount: reviews.length,
-        publishedProducts: (db.prepare("SELECT COUNT(*) AS c FROM products WHERE vendor_id = ? AND status = 'publie'").get(req.params.id) as { c: number }).c,
+        publishedProducts: (await db.prepare("SELECT COUNT(*) AS c FROM products WHERE vendor_id = ? AND status = 'publie'").get(req.params.id) as { c: number }).c,
       },
       kycDocs,
       decisions,
@@ -3960,11 +3836,8 @@ export function createApiRouter(): Router {
   });
 
   // Promo codes CRUD
-  router.get('/admin/promos', requireAdmin, (_req, res) => {
-    const promos = db
-      .prepare('SELECT * FROM promo_codes ORDER BY created_at DESC')
-      .all()
-      .map((p: Record<string, unknown>) => ({
+  router.get('/admin/promos', requireAdmin, async (_req, res) => {
+    const promos = (await db.prepare('SELECT * FROM promo_codes ORDER BY created_at DESC').all()).map((p: Record<string, unknown>) => ({
         code: String(p.code),
         discountType: String(p.discount_type),
         discountValue: Number(p.discount_value),
@@ -3979,7 +3852,7 @@ export function createApiRouter(): Router {
     res.json({ promos });
   });
 
-  router.post('/admin/promos', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/promos', requireAdmin, async (req: AuthReq, res) => {
     const { code, discountType, discountValue, minOrderAmount, maxUses, expiresAt } = req.body as {
       code?: string;
       discountType?: 'percent' | 'fixed';
@@ -3999,10 +3872,10 @@ export function createApiRouter(): Router {
     if (!Number.isFinite(value) || value <= 0 || (discountType === 'percent' && value > 100)) {
       return res.status(400).json({ error: 'Valeur de remise invalide.' });
     }
-    if (db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(normalized)) {
+    if (await db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(normalized)) {
       return res.status(409).json({ error: 'Ce code existe déjà.' });
     }
-    db.prepare(
+    await db.prepare(
       `INSERT INTO promo_codes (code, discount_type, discount_value, min_order_amount, max_uses, used_count, active, expires_at, created_by, created_at)
        VALUES (?, ?, ?, ?, ?, 0, 1, ?, ?, ?)`
     ).run(
@@ -4015,7 +3888,7 @@ export function createApiRouter(): Router {
       req.authUser!.email,
       new Date().toISOString()
     );
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'PROMO_CREATED',
@@ -4026,13 +3899,13 @@ export function createApiRouter(): Router {
     res.status(201).json({ created: true, code: normalized });
   });
 
-  router.put('/admin/promos/:code', requireAdmin, (req: AuthReq, res) => {
+  router.put('/admin/promos/:code', requireAdmin, async (req: AuthReq, res) => {
     const code = req.params.code.toUpperCase();
-    const existing = db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(code);
+    const existing = (await db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(code));
     if (!existing) return res.status(404).json({ error: 'Code introuvable.' });
     const { active } = req.body as { active?: boolean };
-    db.prepare('UPDATE promo_codes SET active = ? WHERE code = ?').run(active === false ? 0 : 1, code);
-    writeAuditLog({
+    await db.prepare('UPDATE promo_codes SET active = ? WHERE code = ?').run(active === false ? 0 : 1, code);
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: active === false ? 'PROMO_DISABLED' : 'PROMO_ENABLED',
@@ -4043,12 +3916,12 @@ export function createApiRouter(): Router {
     res.json({ updated: true });
   });
 
-  router.delete('/admin/promos/:code', requireAdmin, (req: AuthReq, res) => {
+  router.delete('/admin/promos/:code', requireAdmin, async (req: AuthReq, res) => {
     const code = req.params.code.toUpperCase();
-    const existing = db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(code);
+    const existing = (await db.prepare('SELECT code FROM promo_codes WHERE code = ?').get(code));
     if (!existing) return res.status(404).json({ error: 'Code introuvable.' });
-    db.prepare('DELETE FROM promo_codes WHERE code = ?').run(code);
-    writeAuditLog({
+    await db.prepare('DELETE FROM promo_codes WHERE code = ?').run(code);
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'PROMO_DELETED',
@@ -4060,12 +3933,12 @@ export function createApiRouter(): Router {
   });
 
   // Public promo validation (rate limited, no auth)
-  router.post('/promo/validate', rateLimit(30, 60_000), (req, res) => {
+  router.post('/promo/validate', rateLimit(30, 60_000), async (req, res) => {
     const { code, amount } = req.body as { code?: string; amount?: number };
     const normalized = code?.trim().toUpperCase();
     if (!normalized) return res.status(400).json({ error: 'Code requis.' });
     const grandBefore = Math.max(0, Math.round(Number(amount || 0)));
-    const row = db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(normalized) as Record<string, unknown> | undefined;
+    const row = (await db.prepare('SELECT * FROM promo_codes WHERE code = ?').get(normalized) as Record<string, unknown> | undefined);
     if (!row || !Number(row.active)) return res.status(404).json({ error: 'Code promotionnel inconnu ou désactivé.' });
     if (row.expires_at && Date.now() > Date.parse(String(row.expires_at))) {
       return res.status(400).json({ error: 'Ce code promotionnel a expiré.' });
@@ -4084,7 +3957,7 @@ export function createApiRouter(): Router {
   });
 
   // System health & maintenance stats
-  router.get('/admin/system', requireAdmin, (_req: AuthReq, res) => {
+  router.get('/admin/system', requireAdmin, async (_req: AuthReq, res) => {
     const dbStats = fs.statSync(DB_PATH);
     let walSize = 0;
     try {
@@ -4092,7 +3965,7 @@ export function createApiRouter(): Router {
     } catch {
       walSize = 0;
     }
-    const count = (sql: string) => Number((db.prepare(sql).get() as { c: number }).c);
+    const count = async (sql: string) => Number(((await db.prepare(sql).get()) as { c: number }).c);
     let uploadsCount = 0;
     let uploadsSize = 0;
     try {
@@ -4115,15 +3988,15 @@ export function createApiRouter(): Router {
         path: DB_PATH,
         sizeBytes: dbStats.size,
         walBytes: walSize,
-        users: count('SELECT COUNT(*) AS c FROM users'),
-        vendors: count("SELECT COUNT(*) AS c FROM users WHERE role = 'vendor'"),
-        products: count('SELECT COUNT(*) AS c FROM products'),
-        orders: count('SELECT COUNT(*) AS c FROM orders'),
-        reviews: count('SELECT COUNT(*) AS c FROM reviews'),
-        messages: count('SELECT COUNT(*) AS c FROM messages'),
-        payouts: count('SELECT COUNT(*) AS c FROM vendor_payouts'),
-        outboxPending: count('SELECT COUNT(*) AS c FROM outbox_emails WHERE sent_at IS NULL'),
-        outboxFailed: count('SELECT COUNT(*) AS c FROM outbox_emails WHERE sent_at IS NULL AND last_error IS NOT NULL'),
+        users: await count('SELECT COUNT(*) AS c FROM users'),
+        vendors: await count("SELECT COUNT(*) AS c FROM users WHERE role = 'vendor'"),
+        products: await count('SELECT COUNT(*) AS c FROM products'),
+        orders: await count('SELECT COUNT(*) AS c FROM orders'),
+        reviews: await count('SELECT COUNT(*) AS c FROM reviews'),
+        messages: await count('SELECT COUNT(*) AS c FROM messages'),
+        payouts: await count('SELECT COUNT(*) AS c FROM vendor_payouts'),
+        outboxPending: await count('SELECT COUNT(*) AS c FROM outbox_emails WHERE sent_at IS NULL'),
+        outboxFailed: await count('SELECT COUNT(*) AS c FROM outbox_emails WHERE sent_at IS NULL AND last_error IS NOT NULL'),
       },
       uploads: { count: uploadsCount, sizeBytes: uploadsSize },
       sseClients: sseClients.size,
@@ -4132,15 +4005,15 @@ export function createApiRouter(): Router {
   });
 
   // Backups: create (SQLite VACUUM INTO), list, download
-  router.post('/admin/backups', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/backups', requireAdmin, async (req: AuthReq, res) => {
     try {
       const backupsDir = path.join(path.dirname(DB_PATH), 'backups');
       fs.mkdirSync(backupsDir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const fileName = `simcova-backup-${stamp}.db`;
       const target = path.join(backupsDir, fileName);
-      db.prepare(`VACUUM INTO '${target.replace(/'/g, "''")}'`).run();
-      writeAuditLog({
+      await db.prepare(`VACUUM INTO '${target.replace(/'/g, "''")}'`).run();
+      await writeAuditLog({
         actorId: req.authUser!.id,
         actorEmail: req.authUser!.email,
         action: 'BACKUP_CREATED',
@@ -4154,7 +4027,7 @@ export function createApiRouter(): Router {
     }
   });
 
-  router.get('/admin/backups', requireAdmin, (_req, res) => {
+  router.get('/admin/backups', requireAdmin, async (_req, res) => {
     const backupsDir = path.join(path.dirname(DB_PATH), 'backups');
     const backups: Array<{ fileName: string; sizeBytes: number; createdAt: string }> = [];
     try {
@@ -4174,7 +4047,7 @@ export function createApiRouter(): Router {
     res.json({ backups });
   });
 
-  router.get('/admin/backups/:fileName/download', requireAdmin, (req, res) => {
+  router.get('/admin/backups/:fileName/download', requireAdmin, async (req, res) => {
     const safeName = path.basename(req.params.fileName);
     const backupsDir = path.join(path.dirname(DB_PATH), 'backups');
     const resolved = path.resolve(backupsDir, safeName);
@@ -4185,7 +4058,7 @@ export function createApiRouter(): Router {
   });
 
   // Segmented email campaigns (queued into the outbox, flushed by the SMTP job)
-  router.post('/admin/email-campaign', requireAdmin, (req: AuthReq, res) => {
+  router.post('/admin/email-campaign', requireAdmin, async (req: AuthReq, res) => {
     const { segment, subject, body } = req.body as { segment?: 'buyers' | 'vendors' | 'all'; subject?: string; body?: string };
     if (!subject?.trim() || !body?.trim()) {
       return res.status(400).json({ error: 'Objet et message requis.' });
@@ -4194,23 +4067,23 @@ export function createApiRouter(): Router {
     let recipients: string[] = [];
     if (target === 'buyers' || target === 'all') {
       recipients.push(
-        ...((db.prepare('SELECT DISTINCT LOWER(buyer_email) AS email FROM orders').all() as Array<{ email: string }>).map((r) => r.email))
+        ...(await db.prepare('SELECT DISTINCT LOWER(buyer_email) AS email FROM orders').all() as Array<{ email: string }>).map((r) => r.email)
       );
     }
     if (target === 'vendors' || target === 'all') {
       recipients.push(
-        ...((db.prepare("SELECT LOWER(email) AS email FROM users WHERE role = 'vendor'").all() as Array<{ email: string }>).map((r) => r.email))
+        ...(await db.prepare("SELECT LOWER(email) AS email FROM users WHERE role = 'vendor'").all() as Array<{ email: string }>).map((r) => r.email)
       );
     }
     recipients = [...new Set(recipients)];
     for (const to of recipients) {
-      queueTransactionalEmail({
+      await queueTransactionalEmail({
         toEmail: to,
         subject: subject.trim(),
         bodyText: body.trim(),
       });
     }
-    writeAuditLog({
+    await writeAuditLog({
       actorId: req.authUser!.id,
       actorEmail: req.authUser!.email,
       action: 'EMAIL_CAMPAIGN_QUEUED',
@@ -4221,8 +4094,8 @@ export function createApiRouter(): Router {
     res.status(201).json({ queued: recipients.length, segment: target });
   });
 
-  router.get('/admin/audit-logs', requireAdmin, (_req, res) => {
-    const logs = db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 80').all().map((l: Record<string, unknown>) => ({
+  router.get('/admin/audit-logs', requireAdmin, async (_req, res) => {
+    const logs = (await db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 80').all()).map((l: Record<string, unknown>) => ({
       id: String(l.id),
       actorId: String(l.actor_id),
       actorEmail: String(l.actor_email),
@@ -4232,7 +4105,7 @@ export function createApiRouter(): Router {
       details: String(l.details),
       createdAt: String(l.created_at),
     }));
-    const emails = db.prepare('SELECT * FROM outbox_emails ORDER BY created_at DESC LIMIT 40').all().map((e: Record<string, unknown>) => ({
+    const emails = (await db.prepare('SELECT * FROM outbox_emails ORDER BY created_at DESC LIMIT 40').all()).map((e: Record<string, unknown>) => ({
       id: String(e.id),
       toEmail: String(e.to_email),
       subject: String(e.subject),
@@ -4251,7 +4124,7 @@ export function createApiRouter(): Router {
   // PWA WEB PUSH SUBSCRIPTIONS & REAL-TIME STREAM (EXF-607..610)
   // =========================================================================
 
-  router.post('/push/subscribe', (req, res) => {
+  router.post('/push/subscribe', async (req, res) => {
     const { endpoint, subscription, preferences } = req.body as {
       endpoint?: string;
       subscription?: Record<string, unknown>;
@@ -4259,7 +4132,7 @@ export function createApiRouter(): Router {
     };
     const ep = endpoint || `pwa-device-${crypto.randomUUID().slice(0, 8)}`;
     const now = new Date().toISOString();
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO push_subscriptions (id, endpoint, subscription_json, preferences_json, created_at)
       VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(endpoint) DO UPDATE SET
@@ -4275,28 +4148,28 @@ export function createApiRouter(): Router {
     res.status(201).json({ subscribed: true, endpoint: ep });
   });
 
-  router.put('/push/preferences', (req, res) => {
+  router.put('/push/preferences', async (req, res) => {
     const { endpoint, preferences } = req.body as {
       endpoint?: string;
       preferences?: { nouveautes: boolean; promotions: boolean; annonces: boolean };
     };
     if (!endpoint) return res.status(400).json({ error: 'Identifiant d’abonnement requis.' });
-    db.prepare('UPDATE push_subscriptions SET preferences_json = ? WHERE endpoint = ?').run(
+    await db.prepare('UPDATE push_subscriptions SET preferences_json = ? WHERE endpoint = ?').run(
       JSON.stringify(preferences || { nouveautes: true, promotions: true, annonces: true }),
       endpoint
     );
     res.json({ updated: true });
   });
 
-  router.delete('/push/unsubscribe', (req, res) => {
+  router.delete('/push/unsubscribe', async (req, res) => {
     const { endpoint } = req.body as { endpoint?: string };
     if (endpoint) {
-      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
+      await db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(endpoint);
     }
     res.json({ unsubscribed: true });
   });
 
-  router.get('/notifications/stream', (req, res) => {
+  router.get('/notifications/stream', async (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');

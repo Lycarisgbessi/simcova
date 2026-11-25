@@ -41,14 +41,12 @@ interface OrderRow {
   tx_status: string | null;
 }
 
-function loadOrders(f: PeriodFilter): OrderRow[] {
-  const rows = db
-    .prepare(
+async function loadOrders(f: PeriodFilter): Promise<OrderRow[]> {
+  const rows = (await db.prepare(
       `SELECT o.*, p.provider_ref, p.status AS tx_status
        FROM orders o LEFT JOIN payments p ON p.order_id = o.id
        ORDER BY o.created_at DESC`
-    )
-    .all() as unknown as OrderRow[];
+    ).all() as unknown as OrderRow[]);
   const cut = periodCutoff(f.period);
   const from = f.from ? Date.parse(f.from) : 0;
   const to = f.to ? Date.parse(f.to) + 86_400_000 : Number.MAX_SAFE_INTEGER;
@@ -69,10 +67,9 @@ interface VendorLine {
   paymentStatus: string;
 }
 
-function loadVendorLines(f: PeriodFilter): VendorLine[] {
+async function loadVendorLines(f: PeriodFilter): Promise<VendorLine[]> {
   const cut = periodCutoff(f.period);
-  const rows = db
-    .prepare(
+  const rows = (await db.prepare(
       `SELECT oi.vendor_id, oi.order_id, oi.unit_price * oi.quantity AS line_subtotal, oi.delivery_fee,
               u.full_name AS vendor_name, s.name AS shop_name, o.created_at, o.payment_status
        FROM order_items oi
@@ -91,7 +88,7 @@ function loadVendorLines(f: PeriodFilter): VendorLine[] {
     shop_name: string | null;
     created_at: string;
     payment_status: string;
-  }>;
+  }>);
   return rows.map((r) => ({
     vendorId: r.vendor_id,
     vendorName: r.vendor_name,
@@ -123,7 +120,7 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 // ============================================================
 // TRANSACTIONS — exhaustive, filterable, with platform take
 // ============================================================
-export function getAdminTransactions(
+export async function getAdminTransactions(
   f: PeriodFilter & {
     status?: string;
     method?: string;
@@ -133,8 +130,8 @@ export function getAdminTransactions(
     maxAmount?: number;
   }
 ) {
-  const ordersById = new Map(loadOrders({ period: 'all' }).map((o) => [o.id, o]));
-  const vendorLinesAll = loadVendorLines({ period: 'all' });
+  const ordersById = new Map((await loadOrders({ period: 'all' })).map((o) => [o.id, o]));
+  const vendorLinesAll = await loadVendorLines({ period: 'all' });
   const linesByOrder = new Map<string, VendorLine[]>();
   for (const l of vendorLinesAll) {
     const arr = linesByOrder.get(l.orderId) ?? [];
@@ -142,7 +139,7 @@ export function getAdminTransactions(
     linesByOrder.set(l.orderId, arr);
   }
 
-  const filtered = loadOrders(f).filter((o) => {
+  const filtered = (await loadOrders(f)).filter((o) => {
     if (f.status && o.payment_status !== f.status) return false;
     if (f.method && o.payment_method !== f.method) return false;
     if (f.vendorId && !(linesByOrder.get(o.id) ?? []).some((l) => l.vendorId === f.vendorId)) return false;
@@ -206,9 +203,9 @@ export function getAdminTransactions(
 // ============================================================
 // PAYOUTS — per-vendor statements & recorded payouts
 // ============================================================
-export function getAdminPayouts(f: PeriodFilter) {
-  const ordersById = new Map(loadOrders({ period: 'all' }).map((o) => [o.id, o]));
-  const allLines = loadVendorLines({ period: 'all' }).filter((l) => l.paymentStatus === 'paid');
+export async function getAdminPayouts(f: PeriodFilter) {
+  const ordersById = new Map((await loadOrders({ period: 'all' })).map((o) => [o.id, o]));
+  const allLines = (await loadVendorLines({ period: 'all' })).filter((l) => l.paymentStatus === 'paid');
   const periodCut = periodCutoff(f.period);
 
   interface Acc {
@@ -247,15 +244,13 @@ export function getAdminPayouts(f: PeriodFilter) {
     acc.set(l.vendorId, a);
   }
 
-  const payouts = db
-    .prepare(
+  const payouts = (await db.prepare(
       `SELECT vp.*, u.full_name AS vendor_name, s.name AS shop_name
        FROM vendor_payouts vp
        JOIN users u ON u.id = vp.vendor_id
        LEFT JOIN shops s ON s.vendor_id = vp.vendor_id
        ORDER BY vp.created_at DESC LIMIT 100`
-    )
-    .all() as unknown as Array<{
+    ).all() as unknown as Array<{
     id: string;
     vendor_id: string;
     vendor_name: string;
@@ -266,7 +261,7 @@ export function getAdminPayouts(f: PeriodFilter) {
     note: string | null;
     created_by: string;
     created_at: string;
-  }>;
+  }>);
   const paidOutByVendor = new Map<string, number>();
   for (const p of payouts) {
     paidOutByVendor.set(p.vendor_id, (paidOutByVendor.get(p.vendor_id) ?? 0) + Number(p.amount));
@@ -302,7 +297,7 @@ export function getAdminPayouts(f: PeriodFilter) {
   return { statements, payouts, totals };
 }
 
-export function recordVendorPayout(params: {
+export async function recordVendorPayout(params: {
   vendorId: string;
   amount: number;
   method?: string;
@@ -312,8 +307,8 @@ export function recordVendorPayout(params: {
   periodEnd?: string | null;
   actorId: string;
   actorEmail: string;
-}): { ok: boolean; error?: string; id?: string } {
-  const vendor = db.prepare("SELECT id, full_name FROM users WHERE id = ? AND role = 'vendor'").get(params.vendorId) as
+}): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const vendor = (await db.prepare("SELECT id, full_name FROM users WHERE id = ? AND role = 'vendor'").get(params.vendorId)) as
     | { id: string; full_name: string }
     | undefined;
   if (!vendor) return { ok: false, error: 'Vendeur introuvable.' };
@@ -321,7 +316,7 @@ export function recordVendorPayout(params: {
   if (!Number.isFinite(amount) || amount <= 0) return { ok: false, error: 'Montant de reversement invalide.' };
 
   const id = `pay-${crypto.randomUUID().slice(0, 12)}`;
-  db.prepare(
+  await db.prepare(
     `INSERT INTO vendor_payouts (id, vendor_id, amount, method, reference, note, period_start, period_end, created_by, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
@@ -336,7 +331,7 @@ export function recordVendorPayout(params: {
     params.actorEmail,
     new Date().toISOString()
   );
-  writeAuditLog({
+  await writeAuditLog({
     actorId: params.actorId,
     actorEmail: params.actorEmail,
     action: 'VENDOR_PAYOUT_RECORDED',
@@ -350,8 +345,8 @@ export function recordVendorPayout(params: {
 // ============================================================
 // ANALYTICS — KPIs, tops, commission splits, delays
 // ============================================================
-export function getAdminAnalytics(f: PeriodFilter) {
-  const orders = loadOrders(f);
+export async function getAdminAnalytics(f: PeriodFilter) {
+  const orders = await loadOrders(f);
   const paid = orders.filter((o) => o.payment_status === 'paid');
   const grandOf = (o: OrderRow) => Number(o.total_amount) + Number(o.vat_amount) - Number(o.discount_amount ?? 0);
 
@@ -387,9 +382,7 @@ export function getAdminAnalytics(f: PeriodFilter) {
   {
     let sPay = 0, nPay = 0, sShip = 0, nShip = 0, sDeliv = 0, nDeliv = 0;
     for (const o of paid.slice(0, 500)) {
-      const events = db
-        .prepare('SELECT status, created_at FROM order_events WHERE order_id = ? ORDER BY created_at ASC')
-        .all(o.id) as unknown as Array<{ status: string; created_at: string }>;
+      const events = (await db.prepare('SELECT status, created_at FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(o.id) as unknown as Array<{ status: string; created_at: string }>);
       const t0 = Date.parse(o.created_at);
       const find = (st: string[]) => {
         const ev = events.find((e) => st.includes(e.status));
@@ -410,8 +403,7 @@ export function getAdminAnalytics(f: PeriodFilter) {
 
   // Top products / vendors / categories from paid order items
   const cut = periodCutoff(f.period);
-  const itemRows = db
-    .prepare(
+  const itemRows = (await db.prepare(
       `SELECT oi.product_id, oi.product_title, oi.vendor_id, oi.unit_price * oi.quantity AS line_total, oi.quantity,
               u.full_name AS vendor_name, s.name AS shop_name, c.name AS category_name, o.created_at
        FROM order_items oi
@@ -431,7 +423,7 @@ export function getAdminAnalytics(f: PeriodFilter) {
     category_name: string;
     line_total: number;
     quantity: number;
-  }>;
+  }>);
 
   const topProductsMap = new Map<string, { title: string; shopName: string; revenue: number; qty: number }>();
   const topVendorsMap = new Map<string, { name: string; shopName: string; revenue: number; commission: number; orders: Set<string> }>();
@@ -488,7 +480,7 @@ export function getAdminAnalytics(f: PeriodFilter) {
   const zoneDistribution = [...zoneMap.entries()].map(([zone, v]) => ({ zone, ...v })).sort((a, b) => b.orders - a.orders);
 
   // Rating distribution
-  const ratingRows = db.prepare('SELECT rating, COUNT(*) AS c FROM reviews GROUP BY rating ORDER BY rating DESC').all() as unknown as Array<{ rating: number; c: number }>;
+  const ratingRows = (await db.prepare('SELECT rating, COUNT(*) AS c FROM reviews GROUP BY rating ORDER BY rating DESC').all() as unknown as Array<{ rating: number; c: number }>);
   const ratingDistribution = ratingRows.map((r) => ({ rating: Number(r.rating), count: Number(r.c) }));
 
   // Daily series (up to 30 last buckets within period)
@@ -507,7 +499,7 @@ export function getAdminAnalytics(f: PeriodFilter) {
   const dailySeries = [...seriesMap.entries()]
     .sort((a, b) => a[0].localeCompare(b[0]))
     .slice(-30)
-    .map(([date, v]) => ({ date, ...v }));
+    .map(async ([date, v]) => ({ date, ...v }));
 
   return {
     period: f.period,
@@ -535,10 +527,8 @@ function zoneLabels(zoneId: string): string {
 // ============================================================
 // BUYERS — guest directory aggregated by email
 // ============================================================
-export function getAdminBuyers(f: { q?: string; minOrders?: number }) {
-  const rows = db
-    .prepare('SELECT buyer_email, buyer_name, delivery_zone, total_amount, vat_amount, discount_amount, payment_status, payment_mode, created_at FROM orders ORDER BY created_at DESC')
-    .all() as unknown as Array<{
+export async function getAdminBuyers(f: { q?: string; minOrders?: number }) {
+  const rows = (await db.prepare('SELECT buyer_email, buyer_name, delivery_zone, total_amount, vat_amount, discount_amount, payment_status, payment_mode, created_at FROM orders ORDER BY created_at DESC').all() as unknown as Array<{
     buyer_email: string;
     buyer_name: string;
     delivery_zone: string;
@@ -548,7 +538,7 @@ export function getAdminBuyers(f: { q?: string; minOrders?: number }) {
     payment_status: string;
     payment_mode: string;
     created_at: string;
-  }>;
+  }>);
 
   interface BAcc {
     email: string;
@@ -603,14 +593,13 @@ export function getAdminBuyers(f: { q?: string; minOrders?: number }) {
 // ============================================================
 // ORDER DETAIL 360°
 // ============================================================
-export function getAdminOrderDetail(orderId: string) {
-  const o = db.prepare('SELECT o.*, p.provider_ref, p.status AS tx_status, p.method AS tx_method FROM orders o LEFT JOIN payments p ON p.order_id = o.id WHERE o.id = ?').get(orderId) as
+export async function getAdminOrderDetail(orderId: string) {
+  const o = (await db.prepare('SELECT o.*, p.provider_ref, p.status AS tx_status, p.method AS tx_method FROM orders o LEFT JOIN payments p ON p.order_id = o.id WHERE o.id = ?').get(orderId)) as
     | Record<string, unknown>
     | undefined;
   if (!o) return null;
 
-  const items = db
-    .prepare(
+  const items = (await db.prepare(
       `SELECT oi.*, u.full_name AS vendor_name, s.name AS shop_name, s.slug AS shop_slug, c.name AS category_name
        FROM order_items oi
        JOIN users u ON u.id = oi.vendor_id
@@ -618,9 +607,7 @@ export function getAdminOrderDetail(orderId: string) {
        JOIN products p ON p.id = oi.product_id
        JOIN categories c ON c.id = p.category_id
        WHERE oi.order_id = ?`
-    )
-    .all(orderId)
-    .map((it: Record<string, unknown>) => ({
+    ).all(orderId)).map((it: Record<string, unknown>) => ({
       id: String(it.id),
       productId: String(it.product_id),
       productTitle: String(it.product_title),
@@ -638,10 +625,7 @@ export function getAdminOrderDetail(orderId: string) {
       customSpecs: it.custom_specs_json ? JSON.parse(String(it.custom_specs_json)) : null,
     }));
 
-  const events = db
-    .prepare('SELECT id, status, note, actor, created_at FROM order_events WHERE order_id = ? ORDER BY created_at ASC')
-    .all(orderId)
-    .map((e: Record<string, unknown>) => ({
+  const events = (await db.prepare('SELECT id, status, note, actor, created_at FROM order_events WHERE order_id = ? ORDER BY created_at ASC').all(orderId)).map((e: Record<string, unknown>) => ({
       id: String(e.id),
       status: String(e.status),
       note: String(e.note),

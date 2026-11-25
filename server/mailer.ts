@@ -92,8 +92,7 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number; ski
   const transporter = getSmtpTransporter();
   if (!transporter) return { sent: 0, failed: 0, skipped: 0 };
 
-  const pending = db
-    .prepare('SELECT * FROM outbox_emails WHERE sent_at IS NULL AND attempts < ? ORDER BY created_at ASC LIMIT 20')
+  const pending = await db.prepare('SELECT * FROM outbox_emails WHERE sent_at IS NULL AND attempts < ? ORDER BY created_at ASC LIMIT 20')
     .all(MAX_ATTEMPTS) as Array<{
     id: string;
     to_email: string;
@@ -116,13 +115,13 @@ export async function flushOutbox(): Promise<{ sent: number; failed: number; ski
         text,
         html,
       });
-      db.prepare('UPDATE outbox_emails SET sent_at = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?').run(
+      await db.prepare('UPDATE outbox_emails SET sent_at = ?, attempts = attempts + 1, last_error = NULL WHERE id = ?').run(
         new Date().toISOString(),
         mail.id
       );
       sent += 1;
     } catch (err) {
-      db.prepare('UPDATE outbox_emails SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(
+      await db.prepare('UPDATE outbox_emails SET attempts = attempts + 1, last_error = ? WHERE id = ?').run(
         err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
         mail.id
       );

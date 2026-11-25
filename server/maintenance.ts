@@ -10,7 +10,7 @@ import type { OrderEventStatus } from '../src/shared/types.ts';
  * Applies RG-10 expiration to a single pending order if its deadline has passed.
  * Returns true when the order was transitioned to 'expired'.
  */
-export function expireOrderIfDue(orderRow: Record<string, unknown>): boolean {
+export async function expireOrderIfDue(orderRow: Record<string, unknown>): Promise<boolean > {
   if (
     !isOrderExpired({
       paymentStatus: String(orderRow.payment_status),
@@ -20,9 +20,9 @@ export function expireOrderIfDue(orderRow: Record<string, unknown>): boolean {
     return false;
   }
   const now = new Date().toISOString();
-  db.prepare("UPDATE orders SET payment_status = 'expired' WHERE id = ?").run(String(orderRow.id));
-  db.prepare("UPDATE order_items SET item_status = 'expiree' WHERE order_id = ?").run(String(orderRow.id));
-  db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+  await db.prepare("UPDATE orders SET payment_status = 'expired' WHERE id = ?").run(String(orderRow.id));
+  await db.prepare("UPDATE order_items SET item_status = 'expiree' WHERE order_id = ?").run(String(orderRow.id));
+  await db.prepare('INSERT INTO order_events (id, order_id, status, note, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
     `ev-${crypto.randomUUID().slice(0, 8)}`,
     String(orderRow.id),
     'expiree',
@@ -35,26 +35,24 @@ export function expireOrderIfDue(orderRow: Record<string, unknown>): boolean {
 }
 
 /** RG-10 sweep across all stale pending orders (the tracking endpoint only checks lazily). */
-export function sweepExpiredOrders(): number {
-  const rows = db
-    .prepare("SELECT id, payment_status, expires_at FROM orders WHERE payment_status = 'pending' AND expires_at IS NOT NULL")
+export async function sweepExpiredOrders(): Promise<number > {
+  const rows = await db.prepare("SELECT id, payment_status, expires_at FROM orders WHERE payment_status = 'pending' AND expires_at IS NOT NULL")
     .all() as Array<Record<string, unknown>>;
   let expired = 0;
   for (const row of rows) {
-    if (expireOrderIfDue(row)) expired += 1;
+    if (await expireOrderIfDue(row)) expired += 1;
   }
   return expired;
 }
 
 /** EXNF-05: purge KYC documents whose retention deadline (purge_scheduled_at) has passed. */
-export function purgeExpiredKycDocs(): number {
+export async function purgeExpiredKycDocs(): Promise<number > {
   const now = new Date().toISOString();
-  const due = db
-    .prepare('SELECT id, vendor_id, doc_type FROM kyc_documents WHERE purge_scheduled_at IS NOT NULL AND purge_scheduled_at <= ?')
+  const due = await db.prepare('SELECT id, vendor_id, doc_type FROM kyc_documents WHERE purge_scheduled_at IS NOT NULL AND purge_scheduled_at <= ?')
     .all(now) as Array<{ id: string; vendor_id: string; doc_type: string }>;
   for (const doc of due) {
-    db.prepare('DELETE FROM kyc_documents WHERE id = ?').run(doc.id);
-    writeAuditLog({
+    await db.prepare('DELETE FROM kyc_documents WHERE id = ?').run(doc.id);
+    await writeAuditLog({
       actorId: 'system',
       actorEmail: 'system@simcova.africa',
       action: 'KYC_AUTO_PURGED',
@@ -89,10 +87,10 @@ export function getMaintenanceStats(): typeof lastStats {
 }
 
 export function startMaintenanceJobs(): void {
-  const sweep = setInterval(() => {
+  const sweep = setInterval(async () => {
     try {
-      const expired = sweepExpiredOrders();
-      const purged = purgeExpiredKycDocs();
+      const expired = await sweepExpiredOrders();
+      const purged = await purgeExpiredKycDocs();
       lastStats = {
         ...lastStats,
         lastSweepAt: new Date().toISOString(),

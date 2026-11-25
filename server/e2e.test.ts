@@ -13,7 +13,7 @@ process.env.SIMCOVA_TOKEN_SECRET = 'test-jwt-secret-e2e-12345';
 process.env.SIMCOVA_KYC_ENCRYPTION_KEY = 'test-kyc-secret-e2e-67890';
 process.env.JUMIA_AFRICA_WEBHOOK_SECRET = 'test-jumia-webhook-secret';
 
-const { initDatabase, db } = await import('./db.ts');
+const { initDatabase, closeDatabase } = await import('./db.ts');
 const { createApiRouter } = await import('./routes.ts');
 const { jumiaAfricaProvider } = await import('./payments/jumiaAfrica.ts');
 const { estimateCartTotals } = await import('../src/shared/rulesEngine.ts');
@@ -45,7 +45,7 @@ async function apiJson<T>(
   return { status: res.status, data: data as T };
 }
 
-before(async () => {
+before(async () => { await initDatabase();
   initDatabase();
   const app = express();
   app.use(
@@ -56,7 +56,7 @@ before(async () => {
       },
     })
   );
-  app.use('/api', createApiRouter());
+  app.use('/api', await createApiRouter());
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address();
@@ -73,7 +73,7 @@ after(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
   try {
-    db.close();
+    await closeDatabase();
   } catch {
     // ignore
   }

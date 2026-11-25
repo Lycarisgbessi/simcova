@@ -53,6 +53,12 @@ npm run lint      # tsc --noEmit
 - Hébergement applicatif : tout hôte Node 22+ (VPS, Render, Railway…) derrière HTTPS —
   `npm install && npm run build && NODE_ENV=production npm start`.
 
+## Déploiement Vercel (production)
+
+\
+Le point d'entrée serverless est  (Express monté sur le runtime Node Vercel).
+Build automatique :  →  servi statiquement, API routée vers la fonction.
+
 ## Architecture en bref
 
 - `server.ts` + `server/` : API Express, SQLite (`node:sqlite`, WAL), jobs de maintenance (expiration RG-10, purge KYC, flush email), rate limiting, SSE.

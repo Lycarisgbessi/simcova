@@ -10,16 +10,16 @@ process.env.SIMCOVA_DB_PATH = path.join(tmpDir, 'mailer-test.db');
 delete process.env.SMTP_HOST;
 delete process.env.SMTP_FROM;
 
-const { initDatabase, db, queueTransactionalEmail } = await import('./db.ts');
+const { initDatabase, db, closeDatabase, queueTransactionalEmail } = await import('./db.ts');
 const { flushOutbox, isSmtpConfigured, setSmtpTransporterForTests } = await import('./mailer.ts');
 
-before(() => {
+before(async () => { await initDatabase();
   initDatabase();
 });
 
-after(() => {
+after(async () => {
   try {
-    db.close();
+    await closeDatabase();
   } catch {
     // ignore
   }
@@ -36,8 +36,7 @@ test('outbox email lifecycle: queued without SMTP, sent via SMTP, retried on fai
   });
   const idle = await flushOutbox();
   assert.equal(idle.sent, 0);
-  const queuedRow = db
-    .prepare('SELECT sent_at, attempts FROM outbox_emails WHERE to_email = ?')
+  const queuedRow = await db.prepare('SELECT sent_at, attempts FROM outbox_emails WHERE to_email = ?')
     .get('demo@simcova.test') as { sent_at: string | null; attempts: number };
   assert.equal(queuedRow.sent_at, null);
   assert.equal(queuedRow.attempts, 0);
@@ -53,8 +52,7 @@ test('outbox email lifecycle: queued without SMTP, sent via SMTP, retried on fai
   });
   const sent = await flushOutbox();
   assert.ok(sent.sent >= 2, `au moins la file démo + acheteur envoyées (reçu ${sent.sent})`);
-  const sentRow = db
-    .prepare('SELECT sent_at, attempts, last_error FROM outbox_emails WHERE to_email = ?')
+  const sentRow = await db.prepare('SELECT sent_at, attempts, last_error FROM outbox_emails WHERE to_email = ?')
     .get('acheteur@simcova.test') as { sent_at: string | null; attempts: number; last_error: string | null };
   assert.ok(sentRow.sent_at);
   assert.equal(sentRow.last_error, null);
@@ -74,8 +72,7 @@ test('outbox email lifecycle: queued without SMTP, sent via SMTP, retried on fai
   });
   const failed = await flushOutbox();
   assert.equal(failed.failed, 1);
-  const failedRow = db
-    .prepare('SELECT sent_at, attempts, last_error FROM outbox_emails WHERE to_email = ?')
+  const failedRow = await db.prepare('SELECT sent_at, attempts, last_error FROM outbox_emails WHERE to_email = ?')
     .get('echec@simcova.test') as { sent_at: string | null; attempts: number; last_error: string | null };
   assert.equal(failedRow.sent_at, null);
   assert.equal(failedRow.attempts, 1);

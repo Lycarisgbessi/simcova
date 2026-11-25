@@ -25,7 +25,7 @@ async function startServer(): Promise<void> {
     })
   );
 
-  app.use('/api', createApiRouter());
+  app.use('/api', await createApiRouter());
   startMaintenanceJobs();
 
   if (!isProduction) {
